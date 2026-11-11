@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Jino Backup — серверы и выгрузка</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/style.css" />
+    <script src="/assets/app.js" defer></script>
+    <script src="/assets/manage.js" defer></script>
+    <script src="/assets/plan.js" defer></script>
+  </head>
+  <body>
+    <svg aria-hidden="true" class="sprite">
+      <defs>
+        <symbol id="i-server" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="7" rx="2" />
+          <rect x="3" y="14" width="18" height="7" rx="2" />
+          <path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5" />
+        </symbol>
+        <symbol id="i-activity" viewBox="0 0 24 24">
+          <path d="M3 12h4l3-8 4 16 3-8h4" />
+        </symbol>
+        <symbol id="i-list" viewBox="0 0 24 24">
+          <path d="M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01" />
+        </symbol>
+        <symbol id="i-search" viewBox="0 0 24 24">
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <path d="m16 16 5 5" />
+        </symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24">
+          <path d="M20 7v5h-5M4 17v-5h5" />
+          <path
+            d="M5.3 8a7.5 7.5 0 0 1 12.4-3L20 8M4 16l2.3 3A7.5 7.5 0 0 0 18.7 16"
+          />
+        </symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24">
+          <path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z" />
+          <path d="m8 12 3 3 5-6" />
+        </symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24">
+          <rect x="8" y="8" width="12" height="13" rx="2" />
+          <path d="M16 8V3H3v13h5" />
+        </symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24">
+          <path d="m14 6-6 6 6 6" />
+        </symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24">
+          <path
+            d="M10 4 2.5 18a2 2 0 0 0 1.8 3h15.4a2 2 0 0 0 1.8-3L14 4a2.2 2.2 0 0 0-4 0Z"
+          />
+          <path d="M12 9v5M12 17h.01" />
+        </symbol>
+      </defs>
+    </svg>
+    <a class="skip-link" href="#main">Перейти к серверам</a>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <svg aria-hidden="true" class="icon brand-icon">
+            <use href="#i-server" /></svg
+          ><span>Jino <strong>Backup</strong></span>
+        </div>
+        <nav aria-label="Основные разделы">
+          <button class="nav-item" data-view="plan" aria-label="План работ">
+            <svg aria-hidden="true" class="icon"><use href="#i-list" /></svg
+            ><span>План работ</span>
+          </button>
+          <button
+            class="nav-item selected"
+            data-view="servers"
+            aria-label="Серверы"
+            aria-current="page"
+          >
+            <svg aria-hidden="true" class="icon"><use href="#i-server" /></svg
+            ><span>Серверы</span>
+          </button>
+          <button
+            class="nav-item"
+            data-view="availability"
+            aria-label="Доступность"
+          >
+            <svg aria-hidden="true" class="icon"><use href="#i-activity" /></svg
+            ><span>Доступность</span>
+          </button>
+          <button class="nav-item" data-view="events" aria-label="Журнал">
+            <svg aria-hidden="true" class="icon"><use href="#i-list" /></svg
+            ><span>Журнал</span>
+          </button>
+        </nav>
+        <div class="sidebar-note">
+          <svg aria-hidden="true" class="icon"><use href="#i-shield" /></svg>
+          <div>
+            Локальная панель<span>Данные остаются на этом компьютере</span>
+          </div>
+        </div>
+      </aside>
+      <main id="main" tabindex="-1">
+        <header class="page-header">
+          <div>
+            <h1 id="page-title">Серверы</h1>
+            <p id="page-description">
+              Ход выгрузки и доступ к резервному копированию
+            </p>
+          </div>
+          <div class="header-actions">
+            <button class="button secondary" id="add-server">
+              Добавить сервер
+            </button>
+            <button class="button secondary" id="refresh" aria-label="Обновить">
+              <svg aria-hidden="true" class="icon">
+                <use href="#i-refresh" /></svg
+              ><span>Обновить</span></button
+            ><button class="button primary" id="check-all">
+              <svg aria-hidden="true" class="icon">
+                <use href="#i-activity" /></svg
+              >Проверить доступ
+            </button>
+          </div>
+        </header>
+        <div id="connection-error" class="notice danger" role="alert" hidden>
+          Не удалось обновить данные. Проверьте, работает ли локальная панель, и
+          нажмите «Обновить».
+        </div>
+        <div id="demo-banner" class="notice warning demo-banner" hidden>
+          Демонстрационные данные. Проверочный экран на искусственных аккаунтах.
+        </div>
+        <section class="run-overview" aria-label="Текущая выгрузка">
+          <div class="run-info">
+            <div class="run-heading">
+              <span class="status-light muted" id="worker-light"></span>
+              <h2 id="worker-label">Загружаем состояние…</h2>
+            </div>
+            <p id="worker-description">
+              Читаем отчёт и сохранённые части файлов.
+            </p>
+          </div>
+          <dl class="run-totals">
+            <div>
+              <dt>Сохранено</dt>
+              <dd id="total-bytes">—</dd>
+            </div>
+            <div>
+              <dt>Файлов проверено</dt>
+              <dd id="total-files">—</dd>
+            </div>
+            <div>
+              <dt>Дампов проверено</dt>
+              <dd id="total-databases">—</dd>
+            </div>
+          </dl>
+        </section>
+        <section class="overall-progress" aria-label="Общий прогресс">
+          <div class="section-heading">
+            <h2>Общий прогресс</h2>
+            <strong id="overall-percent">0%</strong>
+          </div>
+          <progress
+            id="overall-bar"
+            max="100"
+            value="0"
+            aria-label="Общий прогресс обработки"
+          ></progress>
+          <div class="progress-caption">
+            <span id="overall-count">Подсчитываем очередь</span
+            ><span id="overall-errors"></span>
+          </div>
+          <p class="helper" id="overall-note"></p>
+          <div class="overall-files">
+            <div class="section-heading">
+              <h3>Передача файлов</h3>
+              <span id="overall-file-bytes"></span>
+            </div>
+            <progress
+              id="overall-file-bar"
+              max="100"
+              aria-label="Общий прогресс передачи файлов"
+            ></progress>
+            <p class="helper" id="overall-file-note"></p>
+          </div>
+        </section>
+        <section id="server-view">
+          <div class="tools-row">
+            <label class="reason-filter"
+              ><span class="sr-only">Причина ошибки</span
+              ><select id="reason-filter">
+                <option value="">Все причины</option>
+                <option value="CAPTCHA_REQUIRED">Требуется CAPTCHA</option>
+                <option value="AUTH">Отказ входа</option>
+                <option value="TLS">Сертификат / TLS</option>
+                <option value="CONNECTION">Соединение / тайм-аут</option>
+                <option value="CONFIG">Параметры / пути</option>
+              </select></label
+            >
+            <label class="search"
+              ><svg aria-hidden="true" class="icon">
+                <use href="#i-search" /></svg
+              ><span class="sr-only">Найти сервер по имени или логину</span
+              ><input
+                id="search"
+                type="search"
+                placeholder="Найти по имени или логину"
+                autocomplete="off" /></label
+            ><label class="sort"
+              ><span class="sr-only">Порядок серверов</span
+              ><select id="sort">
+                <option value="activity">Сначала активные</option>
+                <option value="name">По имени</option>
+                <option value="bytes">По объёму данных</option>
+              </select></label
+            >
+          </div>
+          <div class="filters" role="group" aria-label="Фильтр серверов">
+            <button class="filter active" data-filter="all" aria-pressed="true">
+              Все <span id="count-all">—</span></button
+            ><button class="filter" data-filter="active" aria-pressed="false">
+              В работе <span id="count-active">—</span></button
+            ><button class="filter" data-filter="queued" aria-pressed="false">
+              В очереди <span id="count-queued">—</span></button
+            ><button
+              class="filter"
+              data-filter="attention"
+              aria-pressed="false"
+            >
+              Требуют внимания <span id="count-attention">—</span>
+            </button>
+          </div>
+          <div class="workspace">
+            <section class="server-list" aria-label="Список серверов">
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Сервер</th>
+                      <th scope="col">Доступ</th>
+                      <th scope="col" class="stage-column">Выгрузка</th>
+                      <th scope="col" class="bytes-column">Сохранено</th>
+                      <th scope="col" class="controls-column">Файлы / БД</th>
+                    </tr>
+                  </thead>
+                  <tbody id="server-rows">
+                    <tr>
+                      <td colspan="5">
+                        <div class="loading-line"></div>
+                        <div class="loading-line short"></div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colspan="5">
+                        <div class="loading-line"></div>
+                        <div class="loading-line short"></div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="empty-state" id="empty-state" hidden>
+                <h3>Нет подходящих серверов</h3>
+                <p>Измените запрос или выберите другой фильтр.</p>
+                <button class="button secondary" id="reset-filters">
+                  Сбросить фильтры
+                </button>
+              </div>
+              <div class="list-footer">
+                <span id="visible-count">Загружаем серверы…</span
+                ><label class="auto-refresh"
+                  ><input
+                    type="checkbox"
+                    id="auto-refresh"
+                    checked
+                  />Автообновление</label
+                >
+              </div>
+            </section>
+            <aside
+              class="detail"
+              id="detail"
+              tabindex="-1"
+              aria-label="Подробности сервера"
+            >
+              <button class="mobile-back" id="back-to-list">
+                <svg aria-hidden="true" class="icon">
+                  <use href="#i-arrow" /></svg
+                >К списку серверов
+              </button>
+              <div id="detail-empty">
+                <h2>Выберите сервер</h2>
+                <p>Здесь будут файлы, дампы и результат проверки доступа.</p>
+              </div>
+              <div id="detail-content" hidden>
+                <div class="detail-heading">
+                  <h2 id="detail-name"></h2>
+                  <p id="detail-login"></p>
+                  <span class="badge" id="detail-status"></span>
+                </div>
+                <button class="button primary wide" id="open-server-card">
+                  Открыть карточку сервера
+                </button>
+                <section class="detail-section">
+                  <h3>Доступ к хостингу</h3>
+                  <p id="detail-access" class="detail-access"></p>
+                  <p id="detail-access-time" class="secondary-text"></p>
+                  <button class="button secondary wide" id="check-one">
+                    <svg aria-hidden="true" class="icon">
+                      <use href="#i-activity" /></svg
+                    ><span>Проверить доступ</span>
+                  </button>
+                  <p class="helper">
+                    Проверяется вход и чтение списка файлов для копирования.
+                  </p>
+                </section>
+                <section class="detail-section">
+                  <div class="section-heading">
+                    <h3 id="current-title">Текущий файл</h3>
+                    <strong id="current-percent"></strong>
+                  </div>
+                  <p id="current-name" class="file-name"></p>
+                  <progress
+                    id="current-progress"
+                    max="100"
+                    value="0"
+                    aria-label="Прогресс текущего файла"
+                  ></progress>
+                  <div class="progress-caption">
+                    <span id="current-received"></span
+                    ><span id="current-total"></span>
+                  </div>
+                  <p class="helper" id="current-note"></p>
+                </section>
+                <section class="detail-section">
+                  <h3>Базы данных</h3>
+                  <dl class="detail-facts">
+                    <div>
+                      <dt>Проверено дампов</dt>
+                      <dd id="db-count"></dd>
+                    </div>
+                    <div>
+                      <dt>Исходный снимок</dt>
+                      <dd id="db-date"></dd>
+                    </div>
+                  </dl>
+                  <p class="notice warning" id="db-stale" hidden>
+                    Снимок получен ранее. Проверьте исходную дату.
+                  </p>
+                  <p class="helper" id="db-note"></p>
+                </section>
+                <section class="detail-section">
+                  <h3>Папка сохранения</h3>
+                  <input
+                    id="folder-path"
+                    class="folder-path"
+                    type="text"
+                    readonly
+                    aria-label="Путь к папке сервера"
+                  /><button id="copy-folder" class="button text-button">
+                    <svg aria-hidden="true" class="icon">
+                      <use href="#i-copy" /></svg
+                    >Скопировать путь
+                  </button>
+                  <p class="notice warning" id="detail-error" hidden></p>
+                </section>
+              </div>
+            </aside>
+          </div>
+        </section>
+        <section class="events-view" id="events-view" hidden>
+          <div class="event-heading">
+            <h2>Последние события</h2>
+            <span id="event-count"></span>
+          </div>
+          <div id="event-list"></div>
+          <div class="empty-state" id="events-empty" hidden>
+            <h3>Событий пока нет</h3>
+            <p>
+              Они появятся, когда исполнитель начнёт или продолжит выгрузку.
+            </p>
+          </div>
+        </section>
+        <section id="plan-view" hidden aria-label="План работ">
+          <form id="plan-add-form" class="plan-composer">
+            <label
+              >Сервер<select id="plan-server" required>
+                <option value="">Выберите сервер</option>
+              </select></label
+            ><label
+              >Работа<select id="plan-kind">
+                <option value="files">Файлы</option>
+                <option value="databases">Дампы БД</option>
+              </select></label
+            ><label
+              >Транспорт<select id="plan-transport">
+                <option value="ftps">FTPS</option>
+                <option value="sftp">SFTP</option>
+                <option value="https_panel">Панель Jino</option>
+              </select></label
+            ><label
+              >Начать не раньше<input
+                id="plan-start-at"
+                type="datetime-local" /></label
+            ><label
+              >Важность<select id="plan-priority">
+                <option value="normal">Обычная</option>
+                <option value="critical">Критичная</option>
+              </select></label
+            ><button class="button primary" type="submit">
+              Добавить в очередь
+            </button>
+          </form>
+          <section class="panel-policy">
+            <div>
+              <h2>Входы в панель Jino</h2>
+              <p>
+                Один вход в час, не более трёх за три часа. FTP работает
+                отдельной очередью.
+              </p>
+              <p id="policy-status" role="status"></p>
+            </div>
+            <div class="policy-actions">
+              <a
+                class="button secondary"
+                href="https://auth.jino.ru/login/"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Открыть панель Jino</a
+              ><button class="button primary" id="resume-panel-queue" hidden>
+                Разрешить очередь панели
+              </button>
+            </div>
+          </section>
+          <div id="plan-message" class="notice" role="status" hidden></div>
+          <div class="plan-heading">
+            <h2>Запланированные и текущие</h2>
+            <span id="plan-pending-count"></span>
+          </div>
+          <p class="helper">
+            Важные работы можно поднять в начало. Время допуска к панели
+            учитывается при любом порядке.
+          </p>
+          <div id="plan-pending" class="plan-list"></div>
+          <div class="plan-heading">
+            <h2>Выполненные работы</h2>
+            <span id="plan-completed-count"></span>
+          </div>
+          <div id="plan-completed" class="plan-list"></div>
+          <button class="button secondary" id="plan-more-history" hidden>
+            Показать ещё
+          </button>
+        </section>
+        <section
+          id="server-card"
+          class="server-card"
+          hidden
+          aria-labelledby="card-name"
+        >
+          <div class="card-navigation">
+            <button class="button text-button" id="card-back">
+              К списку серверов
+            </button>
+            <label
+              >Выбрать сервер<select id="card-server-select"></select
+            ></label>
+          </div>
+          <header class="card-header">
+            <div>
+              <h2 id="card-name" tabindex="-1"></h2>
+              <p id="card-login" class="secondary-text"></p>
+            </div>
+            <div class="card-actions">
+              <button class="button secondary" id="card-block">
+                Заблокировать</button
+              ><button class="button secondary" id="card-edit">Изменить</button
+              ><button class="button secondary destructive" id="card-delete">
+                Удалить из списка
+              </button>
+            </div>
+          </header>
+          <div id="card-message" class="notice" role="status" hidden></div>
+          <nav class="card-tabs" aria-label="Разделы сервера">
+            <button class="filter active" data-card-tab="overview">
+              Сводка</button
+            ><button class="filter" data-card-tab="files">Файлы FTP</button
+            ><button class="filter" data-card-tab="databases">
+              Базы данных</button
+            ><button class="filter" data-card-tab="logs">Журнал сервера</button
+            ><button class="filter" data-card-tab="settings">Настройки</button>
+          </nav>
+          <section id="card-overview" data-card-panel="overview">
+            <dl class="backup-facts" id="card-backup-facts"></dl>
+            <h3>Доступ и причины ошибок</h3>
+            <p id="card-access" class="secondary-text"></p>
+            <button class="button secondary" id="card-check-panel">
+              Проверить вход в панель
+            </button>
+            <div id="card-diagnostics" class="diagnostic-list"></div>
+            <h3 class="subsection-title">Последние задания</h3>
+            <div id="card-task-summary" class="task-summary"></div>
+            <div class="saved-folder">
+              <h3>Папка сервера</h3>
+              <p id="card-folder"></p>
+              <button class="button text-button" id="card-copy-folder">
+                Скопировать путь
+              </button>
+            </div>
+          </section>
+          <section data-card-panel="files" hidden>
+            <div class="job-heading">
+              <div>
+                <h3>Копирование файлов</h3>
+                <p class="secondary-text" id="card-ftp-endpoint"></p>
+              </div>
+              <label
+                >Транспорт<select id="file-transport">
+                  <option value="ftps">FTP с TLS (FTPS)</option>
+                  <option value="sftp">SFTP</option>
+                  <option value="https_panel">HTTPS через панель Jino</option>
+                </select></label
+              >
+            </div>
+            <div class="job-options">
+              <label
+                >Начать не раньше<input
+                  type="datetime-local"
+                  id="files-start-at" /></label
+              ><label
+                >Важность<select id="files-priority">
+                  <option value="normal">Обычная</option>
+                  <option value="critical">Критичная, в начало очереди</option>
+                </select></label
+              >
+            </div>
+            <label class="file-name-policy">
+              <input id="skip-unsupported-names" type="checkbox" checked />
+              Пропускать имена, несовместимые с Windows
+            </label>
+            <p class="helper">
+              Каталог с таким именем пропускается вместе с содержимым. Пропуски
+              записываются в журнал и манифест; копия отмечается как частичная.
+            </p>
+            <div id="files-job" class="job-area"></div>
+            <p class="helper">
+              Перед передачей выполняется подсчёт файлов и объёма.
+              Подтверждённые части сохраняются для продолжения.
+            </p>
+          </section>
+          <section data-card-panel="databases" hidden>
+            <div class="job-heading">
+              <div>
+                <h3>Выгрузка дампов MySQL</h3>
+                <p class="secondary-text">
+                  Экспорт SQL из доступного снимка хостинга
+                </p>
+              </div>
+              <label
+                >Дата снимка<input id="db-snapshot-date" type="date" /><span
+                  class="helper"
+                  >Пустое поле выбирает последний доступный снимок</span
+                ></label
+              >
+            </div>
+            <div class="job-options">
+              <label
+                >Начать не раньше<input
+                  type="datetime-local"
+                  id="databases-start-at" /></label
+              ><label
+                >Важность<select id="databases-priority">
+                  <option value="normal">Обычная</option>
+                  <option value="critical">Критичная, в начало очереди</option>
+                </select></label
+              >
+            </div>
+            <div id="databases-job" class="job-area"></div>
+          </section>
+          <section data-card-panel="logs" hidden>
+            <div class="job-heading">
+              <h3>Журнал сервера</h3>
+              <label
+                >События<select id="server-log-filter">
+                  <option value="all">Все события</option>
+                  <option value="skipped">Пропуски имён</option>
+                </select></label
+              >
+              <button class="button secondary" id="card-refresh-logs">
+                Обновить журнал
+              </button>
+            </div>
+            <p class="helper">
+              Последние 500 событий выбранного типа. При завершении работы
+              полный список пропусков сохраняется в манифесте.
+            </p>
+            <div id="server-log" class="server-log"></div>
+          </section>
+          <section data-card-panel="settings" hidden>
+            <form id="server-form" class="server-form">
+              <div class="form-grid">
+                <label
+                  >Имя сервера<input
+                    name="name"
+                    required
+                    maxlength="200"
+                    autocomplete="off" /></label
+                ><label
+                  >Логин панели<input
+                    name="login"
+                    maxlength="160"
+                    autocomplete="off" /></label
+                ><label
+                  >Пароль панели<input
+                    name="panel_password"
+                    type="password"
+                    autocomplete="new-password" /><span
+                    class="helper"
+                    id="panel-secret-note"
+                  ></span></label
+                ><label
+                  >FTP-хост<input
+                    name="ftp_host"
+                    maxlength="255"
+                    autocomplete="off" /></label
+                ><label
+                  >FTP-логин<input
+                    name="ftp_login"
+                    maxlength="160"
+                    autocomplete="off" /></label
+                ><label
+                  >FTP-пароль<input
+                    name="ftp_password"
+                    type="password"
+                    autocomplete="new-password" /><span
+                    class="helper"
+                    id="ftp-secret-note"
+                  ></span></label
+                ><label
+                  >Протокол<select name="protocol">
+                    <option value="ftps">FTP с TLS (FTPS)</option>
+                    <option value="sftp">SFTP</option>
+                  </select></label
+                ><label
+                  >Порт<input
+                    name="ftp_port"
+                    type="number"
+                    min="1"
+                    max="65535"
+                    required
+                    value="21" /></label
+                ><label
+                  >Корневой каталог<input
+                    name="remote_root"
+                    value="/"
+                    required /></label
+                ><label
+                  >Файл проверенных ключей SFTP<input
+                    name="known_hosts"
+                    autocomplete="off"
+                /></label>
+              </div>
+              <p class="helper">
+                Для сохранённого пароля оставьте поле пустым. Заполните его для
+                замены.
+              </p>
+              <div
+                id="form-error"
+                class="notice danger"
+                role="alert"
+                hidden
+              ></div>
+              <button class="button primary" type="submit">
+                Сохранить сервер
+              </button>
+            </form>
+          </section>
+        </section>
+        <footer class="page-footer">
+          <span id="update-time">Ожидаем данные</span
+          ><span id="check-queue"></span
+          ><span>Просмотр не останавливает выгрузку</span>
+        </footer>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <span class="sr-only" id="announcement" aria-live="polite"></span>
+  </body>
+</html>

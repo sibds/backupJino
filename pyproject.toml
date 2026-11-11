@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jino-backup-manager"
+version = "0.1.0"
+description = "Verified, encrypted backups of client websites"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=44.0.2,<47", "certifi>=2024.8.30"]
+
+[project.optional-dependencies]
+panel = ["playwright>=1.51,<2"]
+sftp = ["paramiko>=3.5,<5"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+backupctl = "jino_backup.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jino_backup = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

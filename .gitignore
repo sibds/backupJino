@@ -1,0 +1,48 @@
+# Secret source exports
+/abw_sibds__server.json
+sites*.xml
+*.credentials.json
+.env
+.env.*
+!.env.example
+
+# Authentication state and secrets
+/playwright/.auth/
+/.auth/
+/secrets/
+*.pem
+*.key
+*.har
+
+# Customer data and temporary backup artifacts
+/staging/
+/backups/
+*.sql
+*.sql.gz
+*.dump
+*.log
+
+# Python local environment and caches
+/.state/
+/.uv-cache/
+/.test-tmp/
+*.egg-info/
+/build/
+/dist/
+/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+/htmlcov/
+
+# Local browser test artifacts
+/.impeccable/review/
+/test-results/
+/playwright-report/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm

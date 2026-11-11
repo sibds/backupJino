@@ -1,0 +1,15 @@
+{
+  "id": "id",
+  "name": "name",
+  "login": "login",
+  "password": "password",
+  "ftp_host": "ftp_host",
+  "ftp_login": "ftp_login",
+  "ftp_password": "ftp_password",
+  "ftp_protocol": "ftps",
+  "ftp_port": 21,
+  "mysql_host": "mysql_host",
+  "mysql_login": "mysql_login",
+  "mysql_password": "mysql_password",
+  "mysql_port": 3306
+}

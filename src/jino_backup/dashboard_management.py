@@ -1,0 +1,655 @@
+"""Persistent operator tasks and cooperative controls for local backup jobs."""
+
+import json
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timezone
+
+from .dashboard_catalog import DashboardCatalog
+from .downloads import FileLock
+from .errors import BackupError
+from .panel_access import PanelAccessPolicy, iso_time
+
+
+WAITING = {"QUEUED", "SCHEDULED", "WAITING_RATE_LIMIT", "WAITING_OPERATOR"}
+ACTIVE = WAITING | {"RUNNING", "PAUSING", "PAUSED", "STOPPING"}
+TERMINAL = {"FINISHED", "FAILED", "STOPPED", "INTERRUPTED"}
+
+
+def timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class TaskControl:
+    def __init__(self, changed):
+        self.condition = threading.Condition()
+        self.paused = False
+        self.stopped = False
+        self.changed = changed
+
+    def checkpoint(self):
+        with self.condition:
+            waiting = self.paused and not self.stopped
+        if waiting:
+            self.changed("PAUSED")
+            with self.condition:
+                while self.paused and not self.stopped:
+                    self.condition.wait()
+                resumed = not self.stopped
+            if resumed:
+                self.changed("RUNNING")
+        with self.condition:
+            if self.stopped:
+                raise BackupError("CANCELLED")
+
+    def request(self, action):
+        with self.condition:
+            if action == "stop":
+                self.stopped = True
+            else:
+                self.paused = action == "pause"
+            self.condition.notify_all()
+
+    def wait(self, seconds):
+        deadline = time.monotonic() + seconds
+        while True:
+            self.checkpoint()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            with self.condition:
+                self.condition.wait(min(remaining, 0.25))
+
+
+class DashboardManagement:
+    def __init__(self, data, runner=None, access_policy=None):
+        self.data = data
+        self.catalog = DashboardCatalog(data)
+        self.access_policy = access_policy or PanelAccessPolicy(data.state_dir)
+        self.guard = FileLock(data.state_dir / "dashboard-management.lock")
+        self.guard.__enter__()
+        self.lock = threading.RLock()
+        self.controls = {}
+        self.running = set()
+        self.closed = False
+        self.timer = None
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="backup-operator")
+        if runner is None:
+            from .dashboard_runner import OperatorRunner
+
+            runner = OperatorRunner(data, self.catalog)
+        self.runner = runner
+        with self.catalog.connection() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, row_id INTEGER, payload TEXT NOT NULL)"
+            )
+            db.execute("""CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, row_id INTEGER, payload TEXT NOT NULL)""")
+            db.execute("CREATE INDEX IF NOT EXISTS events_server ON events(row_id,id)")
+            db.execute("CREATE INDEX IF NOT EXISTS events_server_stage ON events(row_id,json_extract(payload,'$.stage'),id)")
+            rows = list(db.execute("SELECT id,payload FROM tasks"))
+            for position, row in enumerate(rows):
+                task = json.loads(row["payload"])
+                task.setdefault("position", position)
+                task.setdefault("priority", "normal")
+                task.setdefault("scheduled_at", None)
+                if task["state"] in {"RUNNING", "PAUSING", "STOPPING"}:
+                    task.update(
+                        state="INTERRUPTED", updated_at=timestamp(), error_code="WORKER_RESTARTED"
+                    )
+                db.execute("UPDATE tasks SET payload=? WHERE id=?", (json.dumps(task), row["id"]))
+                if task["state"] in WAITING:
+                    task_id = task["id"]
+                    self.controls[task_id] = TaskControl(
+                        lambda state, identifier=task_id: self._control_state(identifier, state)
+                    )
+        with self.lock:
+            self._schedule()
+
+    def task(self, task_id):
+        with self.catalog.connection() as db:
+            row = db.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            raise BackupError("TASK_NOT_FOUND")
+        return json.loads(row[0])
+
+    def tasks(self, row=None):
+        with self.catalog.connection() as db:
+            query = "SELECT payload FROM tasks"
+            values = ()
+            if row is not None:
+                query += " WHERE row_id=?"
+                values = (row,)
+            return [
+                json.loads(record[0])
+                for record in db.execute(query + " ORDER BY rowid DESC", values)
+            ]
+
+    def _update(self, task_id, **changes):
+        with self.lock, self.catalog.connection() as db:
+            task = json.loads(
+                db.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()[0]
+            )
+            task.update(changes, updated_at=timestamp())
+            db.execute("UPDATE tasks SET payload=? WHERE id=?", (json.dumps(task), task_id))
+        return task
+
+    def event(self, row, stage, *, kind=None, code=None, task_id=None, **details):
+        event = {
+            "time": timestamp(),
+            "row": row,
+            "stage": stage,
+            "kind": kind,
+            "error_code": code,
+            "task_id": task_id,
+        }
+        for key in (
+            "received_bytes",
+            "planned_bytes",
+            "verified_files",
+            "verified_count",
+            "expected_count",
+            "skipped_count",
+            "retry_attempt", "retry_limit", "retry_delay_seconds",
+        ):
+            if type(details.get(key)) is int:
+                event[key] = details[key]
+        if isinstance(details.get("current_file"), str):
+            event["file"] = details["current_file"][:300]
+        if isinstance(details.get("retry_at"), str):
+            event["retry_at"] = details["retry_at"]
+        if stage == "FILE_SKIPPED":
+            if isinstance(details.get("skipped_path"), str):
+                event["file"] = details["skipped_path"][:2000]
+            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME"}:
+                event["skip_reason"] = details["skip_reason"]
+            if details.get("skipped_kind") in {"file", "dir"}:
+                event["skipped_kind"] = details["skipped_kind"]
+        with self.catalog.connection() as db:
+            db.execute("INSERT INTO events(row_id,payload) VALUES (?,?)", (row, json.dumps(event)))
+
+    def events(self, row, limit=300, *, stage=None):
+        self.catalog.get(row, include_deleted=True)
+        with self.catalog.connection() as db:
+            query = "SELECT payload FROM events WHERE row_id=?"
+            parameters = [row]
+            if stage is not None:
+                query += " AND json_extract(payload,'$.stage')=?"
+                parameters.append(stage)
+            parameters.append(limit)
+            return [
+                json.loads(value[0])
+                for value in db.execute(
+                    query + " ORDER BY id DESC LIMIT ?",
+                    parameters,
+                )
+            ]
+
+    def busy(self, row):
+        return any(task["state"] in ACTIVE for task in self.tasks(row))
+
+    def _legacy_busy(self, row):
+        return self.data.process_alive() and any(
+            item.get("row") == row and item.get("status") == "RUNNING"
+            for item in self.data.report()["servers"]
+        )
+
+    def save_server(self, row, payload):
+        with self.lock:
+            if row is not None and (self.busy(row) or self._legacy_busy(row)):
+                raise BackupError("SERVER_BUSY")
+            if (
+                row is not None
+                and self.data.monitor
+                and self.data.monitor.snapshot().get(str(row), {}).get("state") == "CHECKING"
+            ):
+                raise BackupError("SERVER_BUSY")
+            config = self.catalog.save(row, payload)
+            if row is not None and self.data.monitor:
+                self.data.monitor.invalidate(row)
+            self.event(config["row"], "SERVER_UPDATED" if row else "SERVER_ADDED")
+            return config
+
+    def server_action(self, row, action):
+        with self.lock:
+            self.catalog.get(row)
+            if action == "delete":
+                if self.busy(row) or self._legacy_busy(row):
+                    raise BackupError("SERVER_BUSY")
+                self.catalog.set_flag(row, "deleted", True)
+            elif action in {"block", "unblock"}:
+                if self._legacy_busy(row):
+                    raise BackupError("LEGACY_JOB_ACTIVE")
+                self.catalog.set_flag(row, "blocked", action == "block")
+                if action == "block":
+                    for task in self.tasks(row):
+                        if task["state"] in ACTIVE:
+                            self.action(task["id"], "stop")
+            else:
+                raise BackupError("REQUEST_INVALID")
+            self.event(row, "SERVER_" + action.upper())
+            self._schedule()
+        return {"ok": True}
+
+    def start(self, row, kind, options):
+        if kind not in {"files", "databases"} or not isinstance(options, dict):
+            raise BackupError("REQUEST_INVALID")
+        with self.lock:
+            server = self.catalog.get(row)
+            if self.closed or server["blocked"]:
+                raise BackupError("SERVER_BLOCKED")
+            if self._legacy_busy(row):
+                raise BackupError("LEGACY_JOB_ACTIVE")
+            transport = (
+                "https_panel"
+                if kind == "databases"
+                else options.get("transport", server["protocol"])
+            )
+            if transport not in {"ftps", "sftp", "https_panel"}:
+                raise BackupError("SERVER_CONFIG_INVALID")
+            if (
+                kind == "files"
+                and transport in {"ftps", "sftp"}
+                and transport != server["protocol"]
+            ):
+                raise BackupError("PROTOCOL_NOT_CONFIGURED")
+            if kind == "databases" or transport == "https_panel":
+                if not server["can_check"]:
+                    raise BackupError(server["issue"] or "CREDENTIAL_MISSING")
+            elif not server["ftp_ready"]:
+                raise BackupError(server["ftp_issue"] or "FTP_CREDENTIAL_MISSING")
+            snapshot = options.get("snapshot_date")
+            if snapshot is not None:
+                try:
+                    if date.fromisoformat(snapshot).isoformat() != snapshot:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise BackupError("SNAPSHOT_DATE_INVALID") from None
+            for task in self.tasks(row):
+                if task["kind"] != kind:
+                    continue
+                if task["state"] in ACTIVE:
+                    return task
+                if (
+                    (task["state"] in {"FAILED", "STOPPED", "INTERRUPTED"}
+                     or kind == "files" and task["state"] == "FINISHED" and (task.get("result") or {}).get("status") == "PARTIAL")
+                    and task["revision"] == server["binding_revision"]
+                    and task["transport"] == transport
+                    and (snapshot is None or task.get("snapshot_date") == snapshot)
+                ):
+                    return self.action(task["id"], "resume")
+                break
+            task_id = "operator-" + uuid.uuid4().hex[:24]
+            scheduled_at = options.get("scheduled_at")
+            self._scheduled_timestamp(scheduled_at)
+            priority = options.get("priority", "normal")
+            if priority not in {"normal", "critical"}:
+                raise BackupError("REQUEST_INVALID")
+            task = {
+                "id": task_id,
+                "row": row,
+                "kind": kind,
+                "transport": transport,
+                "state": "QUEUED",
+                "stage": "WAITING",
+                "revision": server["binding_revision"],
+                "folder": server["folder"],
+                "created_at": timestamp(),
+                "updated_at": timestamp(),
+                "progress": {},
+                "error_code": None,
+                "result": None,
+                "snapshot_date": snapshot,
+                "skip_unsupported_names": kind == "files" and server["skip_unsupported_names"],
+                "scheduled_at": scheduled_at,
+                "priority": priority,
+                "position": max((item.get("position", 0) for item in self.tasks()), default=0) + 1,
+            }
+            with self.catalog.connection() as db:
+                db.execute("INSERT INTO tasks VALUES (?,?,?)", (task_id, row, json.dumps(task)))
+            self.controls[task_id] = TaskControl(lambda state: self._control_state(task_id, state))
+            self.event(row, "QUEUED", kind=kind, task_id=task_id)
+            if priority == "critical":
+                self._move(task_id, "top")
+            self._schedule()
+            return self.task(task_id)
+
+    def _control_state(self, task_id, state):
+        with self.lock:
+            task = self.task(task_id)
+            if task["state"] == "STOPPING":
+                return
+            self._update(task_id, state=state)
+            self.event(task["row"], state, kind=task["kind"], task_id=task_id)
+
+    def action(self, task_id, action):
+        if action not in {"pause", "resume", "stop"}:
+            raise BackupError("REQUEST_INVALID")
+        with self.lock:
+            task = self.task(task_id)
+            control = self.controls.get(task_id)
+            active = task_id in self.running
+            if action == "resume":
+                server = self.catalog.get(task["row"])
+                if server["blocked"]:
+                    raise BackupError("SERVER_BLOCKED")
+                if server["binding_revision"] != task["revision"]:
+                    raise BackupError("SERVER_CONFIG_CHANGED")
+                partial = task["kind"] == "files" and task["state"] == "FINISHED" and (task.get("result") or {}).get("status") == "PARTIAL"
+                if not partial and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
+                    return task
+                if not active:
+                    control = TaskControl(lambda state: self._control_state(task_id, state))
+                    self.controls[task_id] = control
+                    if task["kind"] == "files":
+                        self._update(task_id, skip_unsupported_names=server["skip_unsupported_names"])
+                self._update(task_id, state="RUNNING" if active else "QUEUED", error_code=None, result=None)
+            elif task["state"] not in ACTIVE:
+                return task
+            else:
+                self._update(
+                    task_id,
+                    state=("PAUSING" if active else "PAUSED")
+                    if action == "pause"
+                    else ("STOPPING" if active else "STOPPED"),
+                )
+            if control:
+                control.request(action)
+            self.event(
+                task["row"], action.upper() + "_REQUESTED", kind=task["kind"], task_id=task_id
+            )
+            self._schedule()
+            return self.task(task_id)
+
+    def _schedule(self):
+        if self.closed:
+            return
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+        all_tasks = self.tasks()
+        busy_rows = {task["row"] for task in all_tasks if task["id"] in self.running}
+        next_wake = []
+        for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
+            if len(self.running) >= 2:
+                break
+            if task["state"] not in WAITING or task["row"] in busy_rows:
+                continue
+            due = self._scheduled_timestamp(task.get("scheduled_at"))
+            if due > time.time():
+                self._update(task["id"], state="SCHEDULED", next_at=iso_time(due))
+                next_wake.append(due)
+                continue
+            if self._uses_panel(task):
+                try:
+                    self.access_policy.reserve(task["row"], task["kind"])
+                except BackupError as error:
+                    if error.code not in {"PANEL_RATE_LIMIT", "PANEL_AUTH_PAUSED"}:
+                        raise
+                    policy = self.access_policy.snapshot()
+                    self._update(
+                        task["id"],
+                        state="WAITING_OPERATOR" if policy["blocked"] else "WAITING_RATE_LIMIT",
+                        next_at=policy["next_at"],
+                        wait_reason=error.code,
+                        error_code=None,
+                    )
+                    if not policy["blocked"]:
+                        next_wake.append(policy["next_timestamp"])
+                    continue
+            self.running.add(task["id"])
+            busy_rows.add(task["row"])
+            self._update(
+                task["id"], state="RUNNING", started_at=timestamp(), next_at=None, error_code=None
+            )
+            self.executor.submit(self._run, task["id"])
+        if next_wake:
+            delay = min(60, max(0.1, min(next_wake) - time.time()))
+            self.timer = threading.Timer(delay, self._wake)
+            self.timer.daemon = True
+            self.timer.start()
+
+    def _wake(self):
+        with self.lock:
+            self._schedule()
+
+    @staticmethod
+    def _uses_panel(task):
+        return task["kind"] == "databases" or task["transport"] == "https_panel"
+
+    @staticmethod
+    def _scheduled_timestamp(value):
+        if value is None or value == "":
+            return 0
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                raise ValueError
+            return parsed.timestamp()
+        except (ValueError, TypeError):
+            raise BackupError("SCHEDULE_INVALID") from None
+
+    def _move(self, task_id, direction):
+        pending = sorted(
+            (
+                item
+                for item in self.tasks()
+                if item["state"] in WAITING
+                or (item["state"] == "PAUSED" and item["id"] not in self.running)
+            ),
+            key=lambda item: item.get("position", 0),
+        )
+        index = next((number for number, item in enumerate(pending) if item["id"] == task_id), None)
+        if index is None:
+            raise BackupError("TASK_BUSY")
+        target = {
+            "up": max(0, index - 1),
+            "down": min(len(pending) - 1, index + 1),
+            "top": 0,
+            "bottom": len(pending) - 1,
+        }.get(direction)
+        if target is None:
+            raise BackupError("REQUEST_INVALID")
+        moved = pending.pop(index)
+        pending.insert(target, moved)
+        with self.catalog.connection() as db:
+            for position, item in enumerate(pending):
+                item["position"] = position
+                db.execute("UPDATE tasks SET payload=? WHERE id=?", (json.dumps(item), item["id"]))
+
+    def change(self, task_id, action, payload):
+        with self.lock:
+            task = self.task(task_id)
+            if task_id in self.running or task["state"] in TERMINAL:
+                raise BackupError("TASK_BUSY")
+            if action == "move":
+                self._move(task_id, payload.get("direction"))
+            elif action == "priority":
+                if payload.get("priority") not in {"normal", "critical"}:
+                    raise BackupError("REQUEST_INVALID")
+                self._update(task_id, priority=payload["priority"])
+                if payload["priority"] == "critical":
+                    self._move(task_id, "top")
+            elif action == "schedule":
+                value = payload.get("scheduled_at")
+                self._scheduled_timestamp(value)
+                self._update(task_id, scheduled_at=value)
+            else:
+                raise BackupError("REQUEST_INVALID")
+            self.event(task["row"], "QUEUE_UPDATED", kind=task["kind"], task_id=task_id)
+            self._schedule()
+            return self.task(task_id)
+
+    def plan(self):
+        with self.lock:
+            servers = {server["row"]: server for server in self.catalog.all()}
+            tasks = self.tasks()
+            policy = self.access_policy.snapshot()
+            slot = policy["next_timestamp"]
+            pending, completed = [], []
+            for task in sorted(tasks, key=lambda item: item.get("position", 0)):
+                server = servers[task["row"]]
+                task.update(server_name=server["name"], server_login=server["login"])
+                task.update(server_deleted=server["deleted"], server_blocked=server["blocked"])
+                task["can_reorder"] = (
+                    task["id"] not in self.running and task["state"] not in TERMINAL
+                )
+                task["estimated_at"] = task.get("scheduled_at")
+                if task["state"] in TERMINAL:
+                    completed.append(task)
+                else:
+                    pending.append(task)
+            completed.sort(key=lambda task: task["updated_at"], reverse=True)
+            reorderable = [task for task in pending if task["can_reorder"]]
+            for rank, task in enumerate(reorderable):
+                task.update(queue_rank=rank, queue_total=len(reorderable))
+            candidates = [
+                task
+                for task in pending
+                if self._uses_panel(task)
+                and task["id"] not in self.running
+                and task["state"] in WAITING
+            ]
+            while candidates and not policy["blocked"]:
+                ready = [
+                    task
+                    for task in candidates
+                    if self._scheduled_timestamp(task.get("scheduled_at")) <= slot
+                ]
+                chosen = (
+                    ready[0]
+                    if ready
+                    else min(
+                        candidates,
+                        key=lambda task: self._scheduled_timestamp(task.get("scheduled_at")),
+                    )
+                )
+                slot = max(slot, self._scheduled_timestamp(chosen.get("scheduled_at")))
+                chosen["estimated_at"] = iso_time(slot)
+                slot += policy["interval_seconds"]
+                candidates.remove(chosen)
+            if policy["blocked_row"] in servers:
+                policy["blocked_server_name"] = servers[policy["blocked_row"]]["name"]
+            return {"pending": pending, "completed": completed, "policy": policy}
+
+    def resume_panel_queue(self):
+        with self.lock:
+            self.access_policy.resume()
+            self._schedule()
+        if self.data.monitor:
+            self.data.monitor.retry_waiting()
+        return {"ok": True}
+
+    def _run(self, task_id):
+        task = self.task(task_id)
+        control = self.controls[task_id]
+        try:
+            server = self.catalog.get(task["row"])
+            control.checkpoint()
+            result = self.runner(
+                server, task, control, lambda **values: self.progress(task_id, values)
+            )
+            if control.stopped:
+                raise BackupError("CANCELLED")
+            failed = result.get("status") in {"FAILED", "CANCELLED"}
+            if result.get("error_code") == "CAPTCHA_REQUIRED":
+                self.access_policy.block(task["row"])
+            if task["kind"] == "databases" and result.get("status") == "DB_ONLY":
+                self.progress(
+                    task_id,
+                    {
+                        "verified_count": result.get("databases_count", 0),
+                        "received_bytes": sum(
+                            item["size_bytes"] for item in result.get("artifacts", [])
+                        ),
+                    },
+                )
+            self._update(
+                task_id,
+                state="FAILED" if failed else "FINISHED",
+                result=result,
+                error_code=result.get("error_code"),
+            )
+        except Exception as error:
+            code = (
+                error.code
+                if isinstance(error, BackupError)
+                else (
+                    "OPERATION_TIMEOUT"
+                    if type(error).__name__ == "TimeoutError"
+                    else "INTERNAL_ERROR"
+                )
+            )
+            if code == "CAPTCHA_REQUIRED":
+                self.access_policy.block(task["row"])
+            self._update(task_id, state="STOPPED" if control.stopped else "FAILED", error_code=code)
+        finally:
+            with self.lock:
+                task = self.task(task_id)
+                self.event(
+                    task["row"],
+                    task["state"],
+                    kind=task["kind"],
+                    code=task.get("error_code"),
+                    task_id=task_id,
+                )
+                self.running.discard(task_id)
+                self._schedule()
+
+    def progress(self, task_id, values):
+        with self.lock:
+            task = self.task(task_id)
+            progress = dict(task["progress"])
+            for key in (
+                "received_bytes",
+                "planned_bytes",
+                "planned_files",
+                "verified_files",
+                "verified_count",
+                "expected_count",
+                "directories_seen",
+                "current_bytes",
+                "current_size",
+                "skipped_count",
+                "retry_attempt", "retry_limit", "retry_delay_seconds",
+            ):
+                if type(values.get(key)) is int and values[key] >= 0:
+                    progress[key] = values[key]
+            if isinstance(values.get("current_file"), str):
+                progress["current_file"] = values["current_file"][:300]
+            if type(values.get("inventory_complete")) is bool:
+                progress["inventory_complete"] = values["inventory_complete"]
+            if "retry_at" in values and (values["retry_at"] is None or isinstance(values["retry_at"], str)):
+                progress["retry_at"] = values["retry_at"]
+            stage = values.get("stage", task["stage"])
+            if not isinstance(stage, str) or not stage.replace("_", "").isalnum():
+                stage = task["stage"]
+            self._update(
+                task_id,
+                progress=progress,
+                stage=stage,
+                snapshot_date=values.get("snapshot_date", task.get("snapshot_date")),
+                workflow_key=values.get("workflow_key", task.get("workflow_key")),
+            )
+            if stage != task["stage"] or values.get("log"):
+                self.event(
+                    task["row"],
+                    stage,
+                    kind=task["kind"],
+                    code=values.get("error_code"),
+                    task_id=task_id,
+                    **progress,
+                    **{key: values[key] for key in ("skipped_path", "skip_reason", "skipped_kind") if key in values},
+                )
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            if self.timer:
+                self.timer.cancel()
+            for control in self.controls.values():
+                control.request("stop")
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        self.guard.__exit__()

@@ -1,0 +1,861 @@
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = {
+  data: null,
+  selected: null,
+  filter: "all",
+  view: "servers",
+  query: "",
+  sort: "activity",
+  loading: false,
+  reason: "",
+};
+const statuses = {
+  SCHEDULED: ["Запланировано", ""],
+  WAITING_RATE_LIMIT: ["Ждёт допуска", "warning"],
+  WAITING_OPERATOR: ["Ждёт оператора", "warning"],
+  IDLE: ["Ожидает запуска", ""],
+  BLOCKED: ["Заблокирован", "warning"],
+  PAUSED: ["На паузе", "warning"],
+  PAUSING: ["Ставится на паузу", "warning"],
+  STOPPING: ["Останавливается", "warning"],
+  RUNNING: ["В работе", "info"],
+  QUEUED: ["В очереди", ""],
+  NEEDS_REVIEW: ["Проверить данные", "warning"],
+  FAILED: ["Ошибка", "danger"],
+  PARTIAL: ["Частичный результат", "warning"],
+  FILES_ONLY: ["Файлы получены", "good"],
+  DB_ONLY: ["Получены только БД", "warning"],
+  COMPLETE: ["Копия готова", "good"],
+  STOPPED: ["Остановлено", "warning"],
+  INTERRUPTED: ["Прервано", "warning"],
+  UNKNOWN: ["Нет данных", ""],
+};
+const stages = {
+  RETRY_WAIT: "Ожидает переподключения",
+  RETRY_EXHAUSTED: "Попытки восстановления исчерпаны",
+  AUTHENTICATE: "Вход",
+  ACCESS_VERIFIED: "Доступ подтверждён",
+  DATABASES: "Базы данных",
+  FILES_DOWNLOAD: "Файлы",
+  FINISHED: "Обработан",
+  RECONNECT: "Переподключение",
+  WAITING: "Ожидает запуска",
+};
+const access = {
+  WAITING_RATE_LIMIT: ["Ждёт допуска", "warning"],
+  WAITING_OPERATOR: ["Ждёт оператора", "warning"],
+  WAITING_JOB: ["Ждёт задание", "muted"],
+  BLOCKED: ["Заблокирован", "warning"],
+  UNKNOWN: ["Не проверен", "muted"],
+  CONFIRMED: ["Подтверждён", "good"],
+  TRANSFERRING: ["Есть передача", "good"],
+  AVAILABLE: ["Доступен", "good"],
+  CHECKING: ["Проверяется", "warning"],
+  UNAVAILABLE: ["Нет подключения", "danger"],
+  AUTH_ERROR: ["Ошибка входа", "danger"],
+  ATTENTION: ["Нужно действие", "warning"],
+  NEEDS_REVIEW: ["Уточнить данные", "warning"],
+};
+function text(id, value) {
+  $(id).textContent = value ?? "—";
+}
+function element(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value !== undefined) node.textContent = value;
+  return node;
+}
+function bytes(value) {
+  if (value === null || value === undefined) return "—";
+  const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+  let n = Math.max(0, Number(value) || 0),
+    i = 0;
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1000;
+    i++;
+  }
+  return (
+    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: i ? 2 : 0 }).format(
+      n
+    ) +
+    " " +
+    units[i]
+  );
+}
+function count(value) {
+  return new Intl.NumberFormat("ru-RU").format(value || 0);
+}
+function timeLabel(value) {
+  if (!value) return "В текущем задании";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Время неизвестно"
+    : date.toLocaleTimeString("ru-RU", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+}
+function dateLabel(value) {
+  if (!value) return "Ещё не определён";
+  const date = new Date(value + "T12:00:00Z");
+  return Number.isNaN(date.getTime())
+    ? "Дата неизвестна"
+    : date.toLocaleDateString("ru-RU");
+}
+function age(value) {
+  if (!value) return "";
+  const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
+  if (seconds < 60) return "только что";
+  if (seconds < 3600) return Math.floor(seconds / 60) + " мин назад";
+  return Math.floor(seconds / 3600) + " ч назад";
+}
+function needsAttention(server) {
+  return (
+    ["FAILED", "NEEDS_REVIEW", "STOPPED", "PARTIAL", "DB_ONLY"].includes(
+      server.status
+    ) ||
+    ["UNAVAILABLE", "AUTH_ERROR", "ATTENTION", "NEEDS_REVIEW"].includes(
+      server.availability.state
+    )
+  );
+}
+function badge(server) {
+  const [label, tone] = statuses[server.status] || statuses.UNKNOWN;
+  return element("span", "badge " + tone, label);
+}
+function percent(value) {
+  return (
+    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(value) +
+    "%"
+  );
+}
+function current(server) {
+  return server.stage === "DATABASES"
+    ? server.databases.current_file
+    : server.progress.current_file;
+}
+function saved(server) {
+  return server.progress.received_bytes + server.databases.received_bytes;
+}
+function toast(message) {
+  text("toast", message);
+  $("toast").hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => ($("toast").hidden = true), 5000);
+  text("announcement", message);
+}
+function visibleServers() {
+  if (!state.data) return [];
+  let rows = state.data.servers.filter((server) => {
+    const reasons = {
+      AUTH: [
+        "AUTH_FAILED",
+        "AUTH_OR_ROOT_FAILED",
+        "FTP_LOGIN_DENIED",
+        "FTP_ROOT_DENIED",
+      ],
+      TLS: ["TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED"],
+      CONNECTION: [
+        "CONNECTION_FAILED",
+        "PANEL_RESPONSE_FAILED",
+        "INTERNAL_ERROR",
+        "OPERATION_TIMEOUT",
+        "TRANSFER_TIMEOUT",
+        "TRANSFER_INTERRUPTED",
+      ],
+      CONFIG: [
+        "REMOTE_PATH_UNSAFE",
+        "FTP_CREDENTIAL_MISSING",
+        "ACCOUNT_AMBIGUOUS",
+        "CREDENTIAL_MISSING",
+      ],
+    };
+    if (
+      state.reason &&
+      !(server.diagnostics || []).some((item) =>
+        (reasons[state.reason] || [state.reason]).includes(item.code)
+      )
+    )
+      return false;
+    if (
+      state.query &&
+      !`${server.name} ${server.login}`
+        .toLocaleLowerCase("ru")
+        .includes(state.query)
+    )
+      return false;
+    if (state.filter === "active") return server.status === "RUNNING";
+    if (state.filter === "queued")
+      return [
+        "QUEUED",
+        "SCHEDULED",
+        "WAITING_RATE_LIMIT",
+        "WAITING_OPERATOR",
+      ].includes(server.status);
+    if (state.filter === "attention") return needsAttention(server);
+    return true;
+  });
+  const priority = (server) =>
+    server.status === "RUNNING"
+      ? 0
+      : needsAttention(server)
+      ? 1
+      : server.status === "QUEUED"
+      ? 2
+      : 3;
+  rows.sort((a, b) =>
+    state.sort === "name"
+      ? a.name.localeCompare(b.name, "ru")
+      : state.sort === "bytes"
+      ? saved(b) - saved(a)
+      : priority(a) - priority(b) || a.row - b.row
+  );
+  return rows;
+}
+const rowCommands = new Set();
+const rowTransports = new Map();
+const rowActiveStates = new Set([
+  "QUEUED",
+  "SCHEDULED",
+  "WAITING_RATE_LIMIT",
+  "WAITING_OPERATOR",
+  "RUNNING",
+  "PAUSING",
+  "PAUSED",
+  "STOPPING",
+]);
+async function rowCommand(server, kind, path, payload) {
+  const key = server.row + ":" + kind;
+  if (rowCommands.has(key)) return;
+  rowCommands.add(key);
+  renderTable();
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok)
+      throw new Error(result.message || "Не удалось выполнить действие");
+    toast("Действие принято: " + (kind === "files" ? "файлы" : "базы данных"));
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    rowCommands.delete(key);
+    renderTable();
+  }
+}
+function canResumeTask(task) {
+  return (
+    !!task &&
+    (["PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"].includes(
+      task.state
+    ) ||
+      (task.kind === "files" &&
+        task.state === "FINISHED" &&
+        task.result?.status === "PARTIAL"))
+  );
+}
+function rowControls(server) {
+  const cell = element("td", "row-controls");
+  for (const kind of ["files", "databases"]) {
+    const task = server.latest_tasks?.[kind];
+    const active = task && rowActiveStates.has(task.state);
+    const resume = canResumeTask(task);
+    const fileResume = kind === "files" && resume;
+    const busy = rowCommands.has(server.row + ":" + kind);
+    const legacyBusy =
+      server.busy && !Object.keys(server.latest_tasks || {}).length;
+    const group = element("div", "row-job");
+    group.dataset.kind = kind;
+    group.setAttribute("role", "group");
+    group.setAttribute(
+      "aria-label",
+      (kind === "files" ? "Файлы: " : "Базы данных: ") + server.name
+    );
+    let transport = "https_panel";
+    if (kind === "files") {
+      const protocol = server.configuration?.protocol || "ftps";
+      transport = active
+        ? task.transport
+        : rowTransports.get(server.row) || (resume ? task.transport : protocol);
+      const select = element("select", "row-transport");
+      select.setAttribute("aria-label", "Транспорт файлов: " + server.name);
+      for (const [value, label] of [
+        [protocol, protocol.toUpperCase()],
+        ["https_panel", "HTTPS"],
+      ]) {
+        const option = element("option", "", label);
+        option.value = value;
+        select.append(option);
+      }
+      select.value = transport;
+      select.disabled = busy || !!active || server.blocked || legacyBusy;
+      select.dataset.row = server.row;
+      select.dataset.rowAction = "transport";
+      select.addEventListener("change", () => {
+        rowTransports.set(server.row, select.value);
+        renderTable();
+      });
+      select.title =
+        "Файлы · " +
+        (transport === "https_panel"
+          ? "HTTPS через панель"
+          : transport.toUpperCase());
+      group.append(select);
+    } else group.append(element("span", "row-kind", "БД"));
+    const configured =
+      kind === "databases" || transport === "https_panel"
+        ? server.can_check
+        : server.configuration?.ftp_ready;
+    const transportMismatch =
+      resume && kind === "files" && transport !== task.transport;
+    const actions = [
+      [
+        "start",
+        "Запустить",
+        "M8 5l11 7-11 7z",
+        !!active ||
+          server.blocked ||
+          legacyBusy ||
+          !configured ||
+          (fileResume && !transportMismatch),
+      ],
+      [
+        "toggle",
+        resume && !fileResume ? "Продолжить" : "Пауза",
+        resume && !fileResume ? "M8 5l11 7-11 7z" : "M8 5v14M16 5v14",
+        !task ||
+          server.blocked ||
+          transportMismatch ||
+          fileResume ||
+          (!resume &&
+            ![
+              "RUNNING",
+              "QUEUED",
+              "SCHEDULED",
+              "WAITING_RATE_LIMIT",
+              "WAITING_OPERATOR",
+            ].includes(task.state)),
+      ],
+      [
+        "stop",
+        "Остановить",
+        "M6 6h12v12H6z",
+        !active || task.state === "STOPPING",
+      ],
+    ];
+    for (const [action, label, path, disabled] of actions) {
+      const button = element("button", "button row-task-button");
+      button.type = "button";
+      button.disabled = busy || !!disabled;
+      button.dataset.row = server.row;
+      button.dataset.rowAction = action;
+      button.setAttribute("aria-label", label);
+      button.title =
+        label +
+        " · " +
+        (kind === "files" ? "Файлы" : "БД") +
+        " · " +
+        server.name;
+      if (action === "toggle" && transportMismatch)
+        button.title =
+          "Для продолжения выберите " +
+          task.transport.replace("https_panel", "HTTPS").toUpperCase();
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      const shape = document.createElementNS(svg.namespaceURI, "path");
+      shape.setAttribute("d", path);
+      svg.append(shape);
+      button.append(svg);
+      button.addEventListener("click", () =>
+        rowCommand(
+          server,
+          kind,
+          action === "start"
+            ? "/api/servers/" + server.row + "/jobs"
+            : "/api/tasks/" +
+                task.id +
+                "/" +
+                (action === "stop" ? "stop" : resume ? "resume" : "pause"),
+          action === "start" ? { kind, transport } : {}
+        )
+      );
+      group.append(button);
+    }
+    if (fileResume) {
+      const button = element(
+        "button",
+        "button primary row-continue",
+        "Продолжить"
+      );
+      button.type = "button";
+      button.dataset.row = server.row;
+      button.dataset.rowAction = "resume";
+      button.disabled = busy || server.blocked || transportMismatch;
+      button.title = transportMismatch
+        ? "Для продолжения выберите " +
+          task.transport.replace("https_panel", "HTTPS").toUpperCase()
+        : "Продолжить прежнюю выгрузку с сохранёнными частями";
+      button.addEventListener("click", () =>
+        rowCommand(server, kind, "/api/tasks/" + task.id + "/resume", {})
+      );
+      group.append(button);
+    }
+    if (task) {
+      const status = element(
+        "span",
+        "row-task-state",
+        task.stage === "RETRY_WAIT"
+          ? "Переподключение " +
+              task.progress.retry_attempt +
+              " из " +
+              task.progress.retry_limit
+          : window.backupTaskLabels?.[task.state] || task.state
+      );
+      if (transportMismatch)
+        status.textContent +=
+          " · Для продолжения выберите " +
+          task.transport.replace("https_panel", "HTTPS").toUpperCase();
+      if (task.error_message && task.error_code !== "CANCELLED")
+        status.title = task.error_message;
+      group.append(status);
+    }
+    cell.append(group);
+  }
+  return cell;
+}
+function renderTable() {
+  const rows = visibleServers();
+  const focused = document.activeElement;
+  const focus = focused?.dataset.row
+    ? {
+        row: focused.dataset.row,
+        action: focused.dataset.rowAction,
+        kind: focused.closest(".row-job")?.dataset.kind,
+      }
+    : null;
+  const fragment = document.createDocumentFragment();
+  for (const server of rows) {
+    const tr = element("tr", server.row === state.selected ? "selected" : "");
+    tr.dataset.serverRow = server.row;
+    tr.setAttribute("aria-selected", String(server.row === state.selected));
+    const nameCell = element("td");
+    const button = element("button", "server-name", server.name);
+    button.dataset.row = server.row;
+    button.title = server.name;
+    button.addEventListener("click", () => selectServer(server.row, true));
+    nameCell.append(
+      button,
+      element("span", "server-login", server.login),
+      element(
+        "span",
+        "mobile-stage",
+        stages[server.stage] || statuses[server.status]?.[0] || "Ожидает"
+      )
+    );
+    for (const diagnostic of (server.diagnostics || []).slice(0, 2)) {
+      nameCell.append(
+        element(
+          "span",
+          "row-diagnostic",
+          diagnostic.source + " · " + diagnostic.message
+        )
+      );
+    }
+    tr.append(nameCell);
+    const accessCell = element("td");
+    const [genericLabel, tone] =
+      access[server.availability.state] || access.UNKNOWN;
+    const label = ["ATTENTION", "AUTH_ERROR", "UNAVAILABLE"].includes(
+      server.availability.state
+    )
+      ? server.availability.message
+      : genericLabel;
+    const labelNode = element("span", "availability " + tone);
+    labelNode.append(
+      element("span", "status-light " + tone),
+      element("span", "", label)
+    );
+    accessCell.append(labelNode);
+    if (server.availability.checked_at)
+      accessCell.append(
+        element("span", "availability-sub", age(server.availability.checked_at))
+      );
+    tr.append(accessCell);
+    const stageCell = element("td", "stage-column");
+    stageCell.append(badge(server));
+    if (server.status === "RUNNING")
+      stageCell.append(
+        element(
+          "span",
+          "availability-sub",
+          stages[server.stage] || "Подготовка"
+        )
+      );
+    tr.append(stageCell);
+    const sizeCell = element("td", "bytes-column");
+    sizeCell.append(
+      element(
+        "span",
+        "row-bytes",
+        saved(server) > 0 ? bytes(saved(server)) : "—"
+      )
+    );
+    const file = current(server);
+    if (file && file.percent !== null) {
+      const p = element("progress", "row-progress");
+      p.max = 100;
+      p.value = file.percent;
+      p.setAttribute("aria-label", "Текущий файл: " + percent(file.percent));
+      sizeCell.append(
+        p,
+        element("div", "row-percent", percent(file.percent) + " файла")
+      );
+    }
+    tr.append(sizeCell);
+    tr.append(rowControls(server));
+    fragment.append(tr);
+  }
+  $("server-rows").replaceChildren(fragment);
+  $("empty-state").hidden = rows.length > 0;
+  document.querySelector(".table-scroll").hidden = rows.length === 0;
+  text(
+    "visible-count",
+    `Показано ${rows.length} из ${state.data?.servers.length || 0}`
+  );
+  if (focus) {
+    const row = document.querySelector(`tr[data-server-row="${focus.row}"]`);
+    const group = focus.kind
+      ? row?.querySelector(`.row-job[data-kind="${focus.kind}"]`)
+      : row;
+    const preferred = focus.action
+      ? group?.querySelector(`[data-row-action="${focus.action}"]`)
+      : row?.querySelector(".server-name");
+    const next =
+      preferred && !preferred.disabled
+        ? preferred
+        : group?.querySelector("button:not(:disabled)") ||
+          row?.querySelector(".server-name");
+    next?.focus({ preventScroll: true });
+  }
+}
+function selectServer(row, move = false) {
+  state.selected = row;
+  renderTable();
+  renderDetail();
+  document.dispatchEvent(new CustomEvent("backup:select", { detail: { row } }));
+  if (window.location.hash.startsWith("#server/")) return;
+  if (move && window.innerWidth <= 920) {
+    $("detail").scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "instant"
+        : "smooth",
+    });
+    $("detail").focus({ preventScroll: true });
+  }
+}
+function renderDetail() {
+  const server = state.data?.servers.find((x) => x.row === state.selected);
+  $("detail-empty").hidden = !!server;
+  $("detail-content").hidden = !server;
+  if (!server) return;
+  text("detail-name", server.name);
+  text("detail-login", server.login);
+  const [status, tone] = statuses[server.status] || statuses.UNKNOWN;
+  text("detail-status", status);
+  $("detail-status").className = "badge " + tone;
+  text("detail-access", server.availability.message);
+  text(
+    "detail-access-time",
+    server.availability.checked_at
+      ? "Подтверждено в " + timeLabel(server.availability.checked_at)
+      : "Отдельная проверка ещё не выполнена"
+  );
+  const checking = server.availability.state === "CHECKING";
+  $("check-one").disabled = !server.can_check || server.busy || checking;
+  $("check-one").querySelector("span").textContent = server.busy
+    ? "Используем текущую передачу"
+    : checking
+    ? "Проверка выполняется…"
+    : "Проверить доступ";
+  const file = current(server);
+  text(
+    "current-title",
+    server.stage === "DATABASES" ? "Текущий SQL-файл" : "Текущий файл"
+  );
+  text(
+    "current-name",
+    file?.name || "Подробности появятся после начала передачи"
+  );
+  text(
+    "current-percent",
+    file?.percent !== null && file?.percent !== undefined
+      ? percent(file.percent)
+      : ""
+  );
+  $("current-progress").hidden = !file || file.percent === null;
+  if (file?.percent !== null && file?.percent !== undefined)
+    $("current-progress").value = file.percent;
+  text(
+    "current-received",
+    file ? "Сохранено " + bytes(file.received_bytes) : ""
+  );
+  text(
+    "current-total",
+    file
+      ? file.size_bytes
+        ? "из " + bytes(file.size_bytes)
+        : "Объём уточняется"
+      : ""
+  );
+  const stamp = file?.updated_at || server.progress.updated_at;
+  text(
+    "current-note",
+    file
+      ? "Последняя запись " +
+          (stamp ? age(stamp) : "время неизвестно") +
+          ". Проверка целого файла — после скачивания."
+      : "Общий объём дерева заранее неизвестен. Ожидание в очереди не означает недоступность сервера."
+  );
+  text(
+    "db-count",
+    count(server.databases.verified_count) +
+      (server.databases.expected_count
+        ? " из " + count(server.databases.expected_count)
+        : "")
+  );
+  text("db-date", dateLabel(server.databases.snapshot_date));
+  $("db-stale").hidden = !server.databases.snapshot_stale;
+  text(
+    "db-note",
+    server.databases.state === "DB_ONLY"
+      ? "Сохранённые дампы прошли проверку. Восстановление сайта не проверялось."
+      : server.databases.current_file
+      ? server.busy && server.stage === "DATABASES"
+        ? "Скачивается дамп. Он ещё не считается проверенным."
+        : "Сохранена часть дампа. Этап ещё не завершён."
+      : "Используются доступные снимки хостинга. Исходная дата сохраняется отдельно."
+  );
+  if ($("folder-path").value !== server.folder_path)
+    $("folder-path").value = server.folder_path;
+  const error =
+    server.error_message ||
+    (!server.can_check ? server.availability.message : null);
+  $("detail-error").hidden = !error;
+  text("detail-error", error || "");
+}
+function renderEvents() {
+  const events = state.data?.events || [];
+  const fragment = document.createDocumentFragment();
+  for (const event of events) {
+    const row = element("div", "event-row");
+    row.append(
+      element("span", "event-time", timeLabel(event.time)),
+      element("span", "event-name", event.name),
+      element("span", "event-message", event.message)
+    );
+    fragment.append(row);
+  }
+  $("event-list").replaceChildren(fragment);
+  $("events-empty").hidden = events.length > 0;
+  text("event-count", events.length ? "Последние " + events.length : "");
+}
+function render() {
+  if (!state.data) return;
+  const { summary, worker, servers } = state.data;
+  if (state.selected === null)
+    state.selected = (
+      servers.find((s) => s.status === "RUNNING") || servers[0]
+    )?.row;
+  $("demo-banner").hidden = !state.data.demo;
+  const running = worker.state === "RUNNING";
+  text(
+    "worker-label",
+    running
+      ? "Выгрузка работает"
+      : worker.state === "WAITING"
+      ? "Очередь ожидает запуска"
+      : worker.state === "PAUSED"
+      ? "Выгрузка на паузе"
+      : worker.state === "FINISHED"
+      ? "Очередь обработана"
+      : "Исполнитель не запущен"
+  );
+  $("worker-light").className =
+    "status-light " + (running ? "good" : "warning");
+  text(
+    "worker-description",
+    state.data.report_error
+      ? "Отчёт пока недоступен. Исполнитель выгрузки работает отдельно от панели."
+      : running
+      ? `Сейчас ${summary.active} в работе, ${summary.queued} ожидают. Предыдущие копии сохраняются.`
+      : worker.state === "WAITING"
+      ? "Порядок и время запуска доступны в разделе «План работ»."
+      : worker.state === "PAUSED"
+      ? "Продолжить или остановить задания можно в карточках серверов."
+      : worker.state === "FINISHED"
+      ? "Проверьте отдельные результаты и ошибки: обработанная очередь не равна полной копии."
+      : "Сохранённый прогресс на месте. Просмотр панели не запускает выгрузку."
+  );
+  text("total-bytes", bytes(summary.received_bytes));
+  text("total-files", count(summary.verified_files));
+  text("total-databases", count(summary.verified_databases));
+  text("count-all", summary.total);
+  text("count-active", summary.active);
+  text("count-queued", summary.queued);
+  text("count-attention", servers.filter(needsAttention).length);
+  text("update-time", "Данные панели на " + timeLabel(state.data.generated_at));
+  text(
+    "check-queue",
+    state.data.checks_pending
+      ? "Проверок в очереди: " + state.data.checks_pending
+      : ""
+  );
+  if (state.view === "events") renderEvents();
+  else {
+    renderTable();
+    renderDetail();
+  }
+}
+async function refresh() {
+  if (state.loading) return;
+  state.loading = true;
+  $("refresh").disabled = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch("/api/state", {
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!response.ok)
+      throw new Error(response.status === 401 ? "SESSION" : "READ");
+    state.data = await response.json();
+    $("connection-error").hidden = true;
+    render();
+    document.dispatchEvent(
+      new CustomEvent("backup:state", { detail: state.data })
+    );
+  } catch (error) {
+    text(
+      "connection-error",
+      error.message === "SESSION"
+        ? "Сессия локальной панели истекла. Перезагрузите страницу."
+        : "Данные временно не обновляются. Выгрузка работает отдельно; попробуйте «Обновить»."
+    );
+    $("connection-error").hidden = false;
+  } finally {
+    clearTimeout(timer);
+    state.loading = false;
+    $("refresh").disabled = false;
+  }
+}
+async function check(payload) {
+  try {
+    const response = await fetch("/api/checks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok)
+      throw new Error(
+        result.message || "Не удалось поставить проверку в очередь"
+      );
+    const queued = result.results.filter((x) => x.queued).length;
+    toast(
+      queued
+        ? "Проверка поставлена в очередь: " +
+            queued +
+            ". Активная выгрузка продолжается."
+        : "По активным серверам используем данные текущей передачи."
+    );
+    await refresh();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+function setFilter(value) {
+  state.filter = value;
+  for (const button of document.querySelectorAll("[data-filter]")) {
+    const active = button.dataset.filter === value;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  renderTable();
+}
+function setView(value) {
+  state.view = value;
+  const events = value === "events";
+  $("server-view").hidden = events;
+  $("events-view").hidden = !events;
+  text(
+    "page-title",
+    events ? "Журнал" : value === "availability" ? "Доступность" : "Серверы"
+  );
+  text(
+    "page-description",
+    events
+      ? "События реальной выгрузки и последние этапы"
+      : value === "availability"
+      ? "Доступ к хостингу для резервного копирования"
+      : "Ход выгрузки и доступ к резервному копированию"
+  );
+  for (const button of document.querySelectorAll("[data-view]")) {
+    const active = button.dataset.view === value;
+    button.classList.toggle("selected", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  if (value === "availability") setFilter("attention");
+  else if (!events) setFilter("all");
+  render();
+}
+$("search").addEventListener("input", (event) => {
+  state.query = event.target.value.trim().toLocaleLowerCase("ru");
+  renderTable();
+});
+$("sort").addEventListener("change", (event) => {
+  state.sort = event.target.value;
+  renderTable();
+});
+for (const button of document.querySelectorAll("[data-filter]"))
+  button.addEventListener("click", () => setFilter(button.dataset.filter));
+for (const button of document.querySelectorAll("[data-view]"))
+  button.addEventListener("click", () => setView(button.dataset.view));
+$("refresh").addEventListener("click", refresh);
+$("check-all").addEventListener("click", () => check({ all: true }));
+$("check-one").addEventListener("click", () => check({ row: state.selected }));
+$("reset-filters").addEventListener("click", () => {
+  $("search").value = "";
+  state.query = "";
+  setFilter("all");
+});
+$("back-to-list").addEventListener("click", () => {
+  $("search").scrollIntoView({ block: "start" });
+  $("search").focus({ preventScroll: true });
+});
+$("copy-folder").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("folder-path").value);
+    toast("Путь к папке скопирован");
+  } catch {
+    $("folder-path").focus();
+    $("folder-path").select();
+    toast("Путь выделен. Нажмите Ctrl+C, чтобы скопировать.");
+  }
+});
+setInterval(() => {
+  if ($("auto-refresh").checked && !document.hidden) refresh();
+}, 3000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && $("auto-refresh").checked) refresh();
+});
+refresh();
