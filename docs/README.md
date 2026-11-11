@@ -24,6 +24,11 @@
 | [12_login_folder_names.md](12_login_folder_names.md) | Папки по логинам, перенос 54 папок и проверка сохранности файлов |
 | [13_all_accounts_download.md](13_all_accounts_download.md) | Работающий массовый проход через HTTPS, очередь, даты БД и продолжение |
 | [14_local_dashboard.md](14_local_dashboard.md) | Локальная панель прогресса, проверка доступа и работа рядом с выгрузкой |
+| [15_management_and_work_plan.md](15_management_and_work_plan.md) | Карточки серверов, управление файлами и БД, очередь, приоритет и лимит входов |
+| [16_ftps_protocol_diagnostics.md](16_ftps_protocol_diagnostics.md) | Документация FTP Jino, сравнение FileZilla, исправление CA-цепочки и три успешные проверки FTPS |
+| [17_remote_name_diagnostic.md](17_remote_name_diagnostic.md) | Причина REMOTE_PATH_UNSAFE: двоеточие в имени Linux-каталога, несовместимое с Windows |
+| [18_skip_unsupported_names.md](18_skip_unsupported_names.md) | Настройка пропуска несовместимых имён, приватный журнал, частичный результат и проверки |
+| [19_recovery_and_server_navigation.md](19_recovery_and_server_navigation.md) | Пять переподключений, продолжение файлов, выбор карточки и реальные наблюдения после обновления |
 
 ## Согласованные исходные условия
 

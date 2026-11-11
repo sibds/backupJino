@@ -1,0 +1,535 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T14:17:35Z",
+  "title": "Design System — Jino Backup Manager",
+  "extensions": {
+    "colorMeta": {
+      "nav": {
+        "role": "primary",
+        "displayName": "Глубокий навигационный синий",
+        "tonalRamp": [
+          "oklch(15.0% 0.0635 248.95)",
+          "oklch(26.4% 0.0635 248.95)",
+          "oklch(37.9% 0.0635 248.95)",
+          "oklch(49.3% 0.0635 248.95)",
+          "oklch(60.7% 0.0635 248.95)",
+          "oklch(72.1% 0.0635 248.95)",
+          "oklch(83.6% 0.0635 248.95)",
+          "oklch(95.0% 0.0635 248.95)"
+        ]
+      },
+      "nav-hover": {
+        "role": "primary",
+        "displayName": "Синий наведения",
+        "tonalRamp": [
+          "oklch(15.0% 0.0732 248.94)",
+          "oklch(26.4% 0.0732 248.94)",
+          "oklch(37.9% 0.0732 248.94)",
+          "oklch(49.3% 0.0732 248.94)",
+          "oklch(60.7% 0.0732 248.94)",
+          "oklch(72.1% 0.0732 248.94)",
+          "oklch(83.6% 0.0732 248.94)",
+          "oklch(95.0% 0.0732 248.94)"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Холодный фон",
+        "tonalRamp": [
+          "oklch(15.0% 0.0062 255.47)",
+          "oklch(26.4% 0.0062 255.47)",
+          "oklch(37.9% 0.0062 255.47)",
+          "oklch(49.3% 0.0062 255.47)",
+          "oklch(60.7% 0.0062 255.47)",
+          "oklch(72.1% 0.0062 255.47)",
+          "oklch(83.6% 0.0062 255.47)",
+          "oklch(95.0% 0.0062 255.47)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Белая поверхность",
+        "tonalRamp": [
+          "oklch(15.0% 0.0000 89.88)",
+          "oklch(26.4% 0.0000 89.88)",
+          "oklch(37.9% 0.0000 89.88)",
+          "oklch(49.3% 0.0000 89.88)",
+          "oklch(60.7% 0.0000 89.88)",
+          "oklch(72.1% 0.0000 89.88)",
+          "oklch(83.6% 0.0000 89.88)",
+          "oklch(95.0% 0.0000 89.88)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Основной чернильный",
+        "tonalRamp": [
+          "oklch(15.0% 0.0470 257.44)",
+          "oklch(26.4% 0.0470 257.44)",
+          "oklch(37.9% 0.0470 257.44)",
+          "oklch(49.3% 0.0470 257.44)",
+          "oklch(60.7% 0.0470 257.44)",
+          "oklch(72.1% 0.0470 257.44)",
+          "oklch(83.6% 0.0470 257.44)",
+          "oklch(95.0% 0.0470 257.44)"
+        ]
+      },
+      "secondary": {
+        "role": "neutral",
+        "displayName": "Серо-синий текст",
+        "tonalRamp": [
+          "oklch(15.0% 0.0398 257.86)",
+          "oklch(26.4% 0.0398 257.86)",
+          "oklch(37.9% 0.0398 257.86)",
+          "oklch(49.3% 0.0398 257.86)",
+          "oklch(60.7% 0.0398 257.86)",
+          "oklch(72.1% 0.0398 257.86)",
+          "oklch(83.6% 0.0398 257.86)",
+          "oklch(95.0% 0.0398 257.86)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Светлая граница",
+        "tonalRamp": [
+          "oklch(15.0% 0.0156 257.20)",
+          "oklch(26.4% 0.0156 257.20)",
+          "oklch(37.9% 0.0156 257.20)",
+          "oklch(49.3% 0.0156 257.20)",
+          "oklch(60.7% 0.0156 257.20)",
+          "oklch(72.1% 0.0156 257.20)",
+          "oklch(83.6% 0.0156 257.20)",
+          "oklch(95.0% 0.0156 257.20)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Рабочий синий",
+        "tonalRamp": [
+          "oklch(15.0% 0.1316 252.35)",
+          "oklch(26.4% 0.1316 252.35)",
+          "oklch(37.9% 0.1316 252.35)",
+          "oklch(49.3% 0.1316 252.35)",
+          "oklch(60.7% 0.1316 252.35)",
+          "oklch(72.1% 0.1316 252.35)",
+          "oklch(83.6% 0.1316 252.35)",
+          "oklch(95.0% 0.1316 252.35)"
+        ]
+      },
+      "accent-soft": {
+        "role": "primary",
+        "displayName": "Информационный светлый",
+        "tonalRamp": [
+          "oklch(15.0% 0.0159 253.90)",
+          "oklch(26.4% 0.0159 253.90)",
+          "oklch(37.9% 0.0159 253.90)",
+          "oklch(49.3% 0.0159 253.90)",
+          "oklch(60.7% 0.0159 253.90)",
+          "oklch(72.1% 0.0159 253.90)",
+          "oklch(83.6% 0.0159 253.90)",
+          "oklch(95.0% 0.0159 253.90)"
+        ]
+      },
+      "good": {
+        "role": "secondary",
+        "displayName": "Подтверждённый зелёный",
+        "tonalRamp": [
+          "oklch(15.0% 0.0824 161.19)",
+          "oklch(26.4% 0.0824 161.19)",
+          "oklch(37.9% 0.0824 161.19)",
+          "oklch(49.3% 0.0824 161.19)",
+          "oklch(60.7% 0.0824 161.19)",
+          "oklch(72.1% 0.0824 161.19)",
+          "oklch(83.6% 0.0824 161.19)",
+          "oklch(95.0% 0.0824 161.19)"
+        ]
+      },
+      "good-soft": {
+        "role": "secondary",
+        "displayName": "Светлый зелёный",
+        "tonalRamp": [
+          "oklch(15.0% 0.0165 156.91)",
+          "oklch(26.4% 0.0165 156.91)",
+          "oklch(37.9% 0.0165 156.91)",
+          "oklch(49.3% 0.0165 156.91)",
+          "oklch(60.7% 0.0165 156.91)",
+          "oklch(72.1% 0.0165 156.91)",
+          "oklch(83.6% 0.0165 156.91)",
+          "oklch(95.0% 0.0165 156.91)"
+        ]
+      },
+      "warn": {
+        "role": "secondary",
+        "displayName": "Предупреждающий охристый",
+        "tonalRamp": [
+          "oklch(15.0% 0.0980 69.99)",
+          "oklch(26.4% 0.0980 69.99)",
+          "oklch(37.9% 0.0980 69.99)",
+          "oklch(49.3% 0.0980 69.99)",
+          "oklch(60.7% 0.0980 69.99)",
+          "oklch(72.1% 0.0980 69.99)",
+          "oklch(83.6% 0.0980 69.99)",
+          "oklch(95.0% 0.0980 69.99)"
+        ]
+      },
+      "warn-soft": {
+        "role": "secondary",
+        "displayName": "Светлый охристый",
+        "tonalRamp": [
+          "oklch(15.0% 0.0328 83.71)",
+          "oklch(26.4% 0.0328 83.71)",
+          "oklch(37.9% 0.0328 83.71)",
+          "oklch(49.3% 0.0328 83.71)",
+          "oklch(60.7% 0.0328 83.71)",
+          "oklch(72.1% 0.0328 83.71)",
+          "oklch(83.6% 0.0328 83.71)",
+          "oklch(95.0% 0.0328 83.71)"
+        ]
+      },
+      "danger": {
+        "role": "secondary",
+        "displayName": "Сигнальный красный",
+        "tonalRamp": [
+          "oklch(15.0% 0.1458 16.17)",
+          "oklch(26.4% 0.1458 16.17)",
+          "oklch(37.9% 0.1458 16.17)",
+          "oklch(49.3% 0.1458 16.17)",
+          "oklch(60.7% 0.1458 16.17)",
+          "oklch(72.1% 0.1458 16.17)",
+          "oklch(83.6% 0.1458 16.17)",
+          "oklch(95.0% 0.1458 16.17)"
+        ]
+      },
+      "danger-soft": {
+        "role": "secondary",
+        "displayName": "Светлый красный",
+        "tonalRamp": [
+          "oklch(15.0% 0.0154 7.49)",
+          "oklch(26.4% 0.0154 7.49)",
+          "oklch(37.9% 0.0154 7.49)",
+          "oklch(49.3% 0.0154 7.49)",
+          "oklch(60.7% 0.0154 7.49)",
+          "oklch(72.1% 0.0154 7.49)",
+          "oklch(83.6% 0.0154 7.49)",
+          "oklch(95.0% 0.0154 7.49)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Нейтральная плашка",
+        "tonalRamp": [
+          "oklch(15.0% 0.0080 253.85)",
+          "oklch(26.4% 0.0080 253.85)",
+          "oklch(37.9% 0.0080 253.85)",
+          "oklch(49.3% 0.0080 253.85)",
+          "oklch(60.7% 0.0080 253.85)",
+          "oklch(72.1% 0.0080 253.85)",
+          "oklch(83.6% 0.0080 253.85)",
+          "oklch(95.0% 0.0080 253.85)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Синий фокуса",
+        "tonalRamp": [
+          "oklch(15.0% 0.1448 252.08)",
+          "oklch(26.4% 0.1448 252.08)",
+          "oklch(37.9% 0.1448 252.08)",
+          "oklch(49.3% 0.1448 252.08)",
+          "oklch(60.7% 0.1448 252.08)",
+          "oklch(72.1% 0.1448 252.08)",
+          "oklch(83.6% 0.1448 252.08)",
+          "oklch(95.0% 0.1448 252.08)"
+        ]
+      },
+      "field-line": {
+        "role": "neutral",
+        "displayName": "??????? ????",
+        "tonalRamp": [
+          "oklch(15.0% 0.0216 252.51)",
+          "oklch(26.4% 0.0216 252.51)",
+          "oklch(37.9% 0.0216 252.51)",
+          "oklch(49.3% 0.0216 252.51)",
+          "oklch(60.7% 0.0216 252.51)",
+          "oklch(72.1% 0.0216 252.51)",
+          "oklch(83.6% 0.0216 252.51)",
+          "oklch(95.0% 0.0216 252.51)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Заголовок страницы",
+        "purpose": "Название текущего раздела."
+      },
+      "title": {
+        "displayName": "Заголовок области",
+        "purpose": "Сводка и журнал."
+      },
+      "body": {
+        "displayName": "Основной текст",
+        "purpose": "Интерфейс и пояснения."
+      },
+      "section": {
+        "displayName": "Внутренний раздел",
+        "purpose": "Подразделы подробностей."
+      },
+      "label": {
+        "displayName": "Компактная подпись",
+        "purpose": "Столбцы и подписи."
+      },
+      "badge": {
+        "displayName": "Статус",
+        "purpose": "Короткие состояния."
+      },
+      "metric": {
+        "displayName": "Сводное число",
+        "purpose": "Количество и объём с табличными цифрами."
+      },
+      "path": {
+        "displayName": "Путь",
+        "purpose": "Локальный путь к папке."
+      },
+      "form-label": {
+        "displayName": "??????? ?????????",
+        "purpose": "??????? ????? ??????? ? ????? ???????????."
+      },
+      "task-title": {
+        "displayName": "??? ??????? ? ?????",
+        "purpose": "?????? ?? ?????? ? ?????? ??????."
+      },
+      "detail-title": {
+        "displayName": "??? ? ??????? ????????????",
+        "purpose": "???????????? ????????? ????????????, 18px."
+      },
+      "server-title": {
+        "displayName": "??? ? ???????? ???????",
+        "purpose": "????????? ????????, 24px; ?? 620px ? 21px."
+      },
+      "queue-label": {
+        "displayName": "?????? ?????",
+        "purpose": "???????????? ? ?????????? ???????, 12px ? line-height 1.25."
+      }
+    },
+    "shadows": [
+      {
+        "name": "toast",
+        "value": "0 8px 24px #172b4630",
+        "purpose": "Краткое сообщение поверх рабочей области."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "0.16s ease-out",
+        "purpose": "Наведение кнопок, навигации и строк."
+      },
+      {
+        "name": "progress-transition",
+        "value": "0.2s ease-out",
+        "purpose": "Изменение заполнения текущего файла."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "transition: none !important; scroll-behavior: auto !important",
+        "purpose": "Отключение переходов при prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide",
+        "value": "1600px"
+      },
+      {
+        "name": "compact",
+        "value": "1250px"
+      },
+      {
+        "name": "icon-navigation",
+        "value": "1080px"
+      },
+      {
+        "name": "stacked-detail",
+        "value": "920px"
+      },
+      {
+        "name": "mobile",
+        "value": "620px"
+      },
+      {
+        "name": "table-task-grid",
+        "value": "600px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Выбор сервера в карточке",
+      "type": "input",
+      "refersTo": "server-selector",
+      "description": "Нативный выбор сервера из полного каталога с видимой подписью; ширина до 420px, перенос на узком экране.",
+      "html": "<label class=\"ds-server-selector\">Выбрать сервер<select><option>Сервер примера</option><option>Второй сервер</option></select></label>",
+      "css": ".ds-server-selector {display:grid;gap:7px;width:min(100%,420px);color:var(--text, #203047);font:12px/1.45 \"Segoe UI\",system-ui,-apple-system,sans-serif;} .ds-server-selector select {width:100%;min-width:0;min-height:44px;padding:9px 11px;border:1px solid var(--line, #dce3ed);border-radius:6px;color:var(--text, #203047);background:var(--surface, #fff);font:16px/1.45 \"Segoe UI\",system-ui,-apple-system,sans-serif;} .ds-server-selector select:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;}"
+    },
+    {
+      "name": "Основная кнопка",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Основное действие проверки доступа.",
+      "html": "<button class=\"ds-button ds-primary\">Проверить доступ</button>",
+      "css": ".ds-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:1px solid transparent; border-radius:6px; padding:9px 13px; min-height:38px; font:500 14px/1.25 \"Segoe UI\",system-ui,sans-serif; cursor:pointer; transition:background .16s ease-out,border-color .16s ease-out; } .ds-button:disabled { opacity:.55; cursor:default; } .ds-button:focus-visible { outline:2px solid var(--focus, #1d6fbe); outline-offset:3px; } @media(prefers-reduced-motion:reduce) { .ds-button { transition:none; } } .ds-primary { background:var(--accent, #145da3); color:var(--surface, #fff); } .ds-primary:hover:not(:disabled) { background:#0f4d89; }"
+    },
+    {
+      "name": "Вторичная кнопка",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Обновление и действия в подробностях.",
+      "html": "<button class=\"ds-button ds-secondary\">Обновить</button>",
+      "css": ".ds-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:1px solid transparent; border-radius:6px; padding:9px 13px; min-height:38px; font:500 14px/1.25 \"Segoe UI\",system-ui,sans-serif; cursor:pointer; transition:background .16s ease-out,border-color .16s ease-out; } .ds-button:disabled { opacity:.55; cursor:default; } .ds-button:focus-visible { outline:2px solid var(--focus, #1d6fbe); outline-offset:3px; } @media(prefers-reduced-motion:reduce) { .ds-button { transition:none; } } .ds-secondary { background:var(--surface, #fff); color:var(--text, #203047); border-color:#ccd6e3; } .ds-secondary:hover:not(:disabled) { background:#f0f5fb; border-color:#9cb4d0; }"
+    },
+    {
+      "name": "Текстовое действие",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "Копирование пути рядом с полем.",
+      "html": "<button class=\"ds-copy\">Скопировать путь</button>",
+      "css": ".ds-copy { color:var(--accent, #145da3); background:transparent; border:0; padding:8px 0; min-height:32px; font:500 14px/1.25 \"Segoe UI\",system-ui,sans-serif; cursor:pointer; } .ds-copy:hover { color:#093d72; text-decoration:underline; text-underline-offset:3px; } .ds-copy:focus-visible { outline:2px solid var(--focus, #1d6fbe); outline-offset:3px; }"
+    },
+    {
+      "name": "Поиск сервера",
+      "kind": "input",
+      "refersTo": "search",
+      "description": "Поиск по имени или логину с фокусом на границе.",
+      "html": "<label class=\"ds-search\"><svg aria-hidden=\"true\" viewBox=\"0 0 24 24\"><circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"m16 16 5 5\"/></svg><input type=\"search\" aria-label=\"Найти сервер по имени или логину\" placeholder=\"Найти по имени или логину\"></label>",
+      "css": ".ds-search { display:flex; align-items:center; gap:10px; width:100%; max-width:440px; padding:0 12px; border:1px solid #cbd6e3; border-radius:6px; background:var(--surface, #fff); color:var(--secondary, #55647a); } .ds-search svg { width:18px; height:18px; flex:none; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; } .ds-search input { min-width:0; width:100%; height:39px; border:0; background:transparent; color:var(--text, #203047); outline:none; font:14px/1.45 \"Segoe UI\",system-ui,sans-serif; caret-color:var(--accent, #145da3); } .ds-search input::placeholder { color:#627187; } .ds-search:focus-within { border-color:var(--focus, #1d6fbe); }"
+    },
+    {
+      "name": "Навигация",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Синяя навигация с явным текущим разделом и постоянными доступными именами.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Основные разделы\"><button class=\"ds-nav-item\" aria-label=\"???? ?????\">???? ?????</button><button class=\"ds-nav-item ds-selected\" aria-label=\"Серверы\" aria-current=\"page\">Серверы</button><button class=\"ds-nav-item\" aria-label=\"Доступность\">Доступность</button><button class=\"ds-nav-item\" aria-label=\"Журнал\">Журнал</button></nav>",
+      "css": ".ds-nav { display:grid; gap:6px; padding:16px; width:176px; background:var(--nav, #183754); } .ds-nav-item { border:0; border-radius:7px; padding:12px 14px; text-align:left; color:#c3d2e3; background:transparent; font:500 14px/1.45 \"Segoe UI\",system-ui,sans-serif; cursor:pointer; transition:background .16s ease-out,color .16s ease-out; } .ds-nav-item:hover { background:var(--nav-hover, #254a6d); color:#fff; } .ds-nav-item.ds-selected { background:#2d557c; color:#fff; } .ds-nav-item:focus-visible { outline:2px solid var(--focus, #1d6fbe); outline-offset:3px; } @media(prefers-reduced-motion:reduce) { .ds-nav-item { transition:none; } }"
+    },
+    {
+      "name": "Фильтр со счётчиком",
+      "kind": "chip",
+      "description": "Текущий фильтр обозначается заливкой и aria-pressed.",
+      "html": "<button class=\"ds-filter\" aria-pressed=\"true\">Все <span>56</span></button>",
+      "css": ".ds-filter { display:inline-flex; align-items:center; gap:8px; border:1px solid #c8daf1; border-radius:6px; padding:7px 10px; background:#e2edfb; color:#144e8c; font:600 14px/1.45 \"Segoe UI\",system-ui,sans-serif; cursor:pointer; } .ds-filter span { padding:1px 4px; min-width:18px; text-align:center; background:#cedff5; color:#144e8c; border-radius:4px; font-size:12px; font-variant-numeric:tabular-nums; } .ds-filter:hover { background:#e6edf5; } .ds-filter:focus-visible { outline:2px solid var(--focus, #1d6fbe); outline-offset:3px; }"
+    },
+    {
+      "name": "Статусы",
+      "kind": "chip",
+      "refersTo": "badge",
+      "description": "Семантические подписи этапа и результата.",
+      "html": "<div class=\"ds-badges\"><span class=\"ds-badge\">В очереди</span><span class=\"ds-badge ds-info\">В работе</span><span class=\"ds-badge ds-good\">Дампы проверены</span><span class=\"ds-badge ds-warning\">Проверить данные</span><span class=\"ds-badge ds-danger\">Ошибка</span></div>",
+      "css": ".ds-badges { display:flex; flex-wrap:wrap; gap:8px; } .ds-badge { display:inline-flex; padding:4px 7px; border-radius:4px; background:var(--muted, #edf1f6); color:var(--secondary, #55647a); font:500 11px/1.4 \"Segoe UI\",system-ui,sans-serif; } .ds-info { background:var(--accent-soft, #eaf2fc); color:#185996; } .ds-good { background:var(--good-soft, #e9f5ed); color:var(--good, #226447); } .ds-warning { background:var(--warn-soft, #fff3dc); color:var(--warn, #80520e); } .ds-danger { background:var(--danger-soft, #fceef0); color:var(--danger, #a13242); }"
+    },
+    {
+      "name": "Панель подробностей",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Белая поверхность с внутренним разделителем.",
+      "html": "<section class=\"ds-panel\"><h2>Сервер примера</h2><p>demo-login</p><section class=\"ds-panel-section\"><h3>Доступ к хостингу</h3><p>Отдельная проверка ещё не выполнена</p></section></section>",
+      "css": ".ds-panel { max-width:322px; padding:22px; background:var(--surface, #fff); color:var(--text, #203047); border:1px solid var(--line, #dce3ed); border-radius:12px; font:14px/1.45 \"Segoe UI\",system-ui,sans-serif; } .ds-panel h2 { margin:0; font-size:18px; font-weight:600; line-height:1.4; letter-spacing:-.012em; overflow-wrap:anywhere; } .ds-panel p { margin:4px 0 0; font-size:13px; color:var(--secondary, #55647a); } .ds-panel-section { border-top:1px solid var(--line, #dce3ed); margin-top:20px; padding-top:19px; } .ds-panel h3 { margin:0 0 10px; font-size:14px; font-weight:600; }"
+    },
+    {
+      "name": "Прогресс текущего файла",
+      "kind": "custom",
+      "refersTo": "progress",
+      "description": "Достоверный прогресс одного файла с текстовым значением.",
+      "html": "<section class=\"ds-progress\"><div><strong>Текущий файл</strong><span>49,8%</span></div><p>example.zip</p><progress max=\"100\" value=\"49.8\" aria-label=\"Прогресс текущего файла\"></progress><p>Сохранено 7,96 ГБ из 16 ГБ</p></section>",
+      "css": ".ds-progress { max-width:300px; color:var(--text, #203047); font:12px/1.45 \"Segoe UI\",system-ui,sans-serif; font-variant-numeric:tabular-nums; } .ds-progress div { display:flex; justify-content:space-between; gap:12px; font-size:14px; } .ds-progress strong { font-weight:600; } .ds-progress span { color:var(--accent, #145da3); font-weight:600; } .ds-progress p { margin:8px 0 12px; color:var(--secondary, #55647a); } .ds-progress progress { appearance:none; display:block; width:100%; height:6px; border:0; border-radius:3px; overflow:hidden; background:#e6edf6; color:var(--accent, #145da3); accent-color:var(--accent, #145da3); } .ds-progress progress::-webkit-progress-bar { background:#e6edf6; border-radius:3px; } .ds-progress progress::-webkit-progress-value { background:var(--accent, #145da3); border-radius:3px; transition:width .2s ease-out; } .ds-progress progress::-moz-progress-bar { background:var(--accent, #145da3); border-radius:3px; } @media(prefers-reduced-motion:reduce) { .ds-progress progress::-webkit-progress-value { transition:none; } }"
+    },
+    {
+      "name": "???? ???????? ???????",
+      "kind": "input",
+      "refersTo": "form-field",
+      "description": "??????? 13px ??? ????? ??????? ?? 40px; ??????????? ?????? ????????? ???????.",
+      "html": "<form class=\"ds-form\"><label>??? ???????<input value=\"?????? ???????\"></label><label>?????? ??????<input type=\"password\" autocomplete=\"new-password\"><small>?????? ????????</small></label></form>",
+      "css": ".ds-form {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px;max-width:1000px;color:var(--text, #203047);font-family:\"Segoe UI\",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45;} .ds-form label {display:grid;align-content:start;gap:7px;font-size:13px;} .ds-form input {width:100%;min-width:0;min-height:40px;padding:9px 11px;border:1px solid #cbd6e3;border-radius:6px;background:var(--surface, #fff);color:var(--text, #203047);font:inherit;} .ds-form input:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} .ds-form small {font-size:12px;line-height:1.65;color:var(--secondary, #55647a);} @media(max-width:620px) {.ds-form {grid-template-columns:1fr;} .ds-form input {font-size:16px;}}"
+    },
+    {
+      "name": "???????? ???????",
+      "kind": "card",
+      "refersTo": "server-card",
+      "description": "?????? ??????? ???????? ?? ????????? ? ???????????? ?????????? ???????.",
+      "html": "<section class=\"ds-server\"><h2>?????? ???????</h2><p>demo-login</p><nav aria-label=\"??????? ???????\"><button aria-pressed=\"true\">??????</button><button aria-pressed=\"false\">????? FTP</button><button aria-pressed=\"false\">???? ??????</button><button aria-pressed=\"false\">?????? ???????</button><button aria-pressed=\"false\">?????????</button></nav><p>????????? ???????? CAPTCHA</p></section>",
+      "css": ".ds-server {padding:24px;border:1px solid var(--line, #dce3ed);border-radius:12px;background:var(--surface, #fff);color:var(--text, #203047);font-family:\"Segoe UI\",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45;} .ds-server h2 {margin:14px 0 5px;font-size:24px;font-weight:600;line-height:1.4;overflow-wrap:anywhere;} .ds-server p {margin:0;color:var(--secondary, #55647a);font-size:12px;} .ds-server nav {display:flex;flex-wrap:wrap;gap:8px;margin:22px 0 24px;padding-bottom:16px;border-bottom:1px solid var(--line, #dce3ed);} .ds-server button {border:1px solid transparent;border-radius:6px;padding:7px 10px;background:transparent;color:var(--secondary, #55647a);font:inherit;cursor:pointer;} .ds-server button[aria-pressed=\"true\"] {background:#e2edfb;border-color:#c8daf1;color:#144e8c;font-weight:600;} .ds-server button:hover {background:#e6edf5;} .ds-server button:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} @media(max-width:620px) {.ds-server {padding:18px;} .ds-server h2 {font-size:21px;} .ds-server nav {gap:5px;} .ds-server button {min-height:38px;font-size:12px;}}"
+    },
+    {
+      "name": "?????? ? ?????",
+      "kind": "card",
+      "refersTo": "plan-task",
+      "description": "???, ?????????, ??????????? ? ?????? ?????? ?????? ?????? ?????? ?????.",
+      "html": "<section class=\"ds-plan\"><article><header><div><a href=\"#server/demo\">?????? ???????</a><small>demo-login</small></div><span class=\"ds-plan-state\">?????????????</span></header><p>????? ? FTPS ? ????????? ??????</p><time datetime=\"2026-11-12T10:00:00\">?????? ?????? 12.11.2026, 10:00</time></article></section>",
+      "css": ".ds-plan {border:1px solid var(--line, #dce3ed);border-radius:12px;overflow:hidden;background:var(--surface, #fff);color:var(--text, #203047);font-family:\"Segoe UI\",system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45;} .ds-plan article {padding:22px;border-bottom:1px solid var(--line, #dce3ed);} .ds-plan article:last-child {border-bottom:0;} .ds-plan header {display:flex;align-items:flex-start;justify-content:space-between;gap:20px;} .ds-plan a {font-size:16px;font-weight:600;color:var(--accent, #145da3);text-decoration:none;overflow-wrap:anywhere;} .ds-plan a:hover {text-decoration:underline;} .ds-plan a:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} .ds-plan p {margin:13px 0 8px;font-size:13px;} .ds-plan small {display:block;margin-top:4px;font-size:12px;color:var(--secondary, #55647a);} .ds-plan .ds-plan-state {display:inline-flex;padding:4px 7px;border-radius:4px;background:var(--muted, #edf1f6);color:var(--secondary, #55647a);font-size:11px;font-weight:500;line-height:1.4;} .ds-plan time {font-size:12px;line-height:1.65;color:var(--secondary, #55647a);} @media(max-width:620px) {.ds-plan article {padding:18px;} .ds-plan header {flex-direction:column;gap:10px;}}"
+    },
+    {
+      "name": "?????????? ????????",
+      "kind": "custom",
+      "refersTo": "queue-control",
+      "description": "?????? ??????? ? ????????? ??????; ??????????? ??????????? ????????? ?????.",
+      "html": "<div class=\"ds-queue\" role=\"group\" aria-label=\"?????????? ??????? ??????? ???????\"><button>? ??????</button><button disabled>????</button><button>????</button><button>?????</button><button>????????</button></div>",
+      "css": ".ds-queue {display:flex;flex-wrap:wrap;gap:8px;} .ds-queue button {display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:9px 13px;border:1px solid #ccd6e3;border-radius:6px;background:var(--surface, #fff);color:var(--text, #203047);font-family:\"Segoe UI\",system-ui,-apple-system,sans-serif;font-size:12px;font-weight:500;line-height:1.25;cursor:pointer;transition:background .16s ease-out,border-color .16s ease-out;} .ds-queue button:hover:not(:disabled) {background:#f0f5fb;border-color:#9cb4d0;} .ds-queue button:disabled {opacity:.55;cursor:default;} .ds-queue button:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} @media(prefers-reduced-motion:reduce) {.ds-queue button {transition:none;}}"
+    },
+    {
+      "name": "Политика имён файлов",
+      "kind": "input",
+      "refersTo": "checkbox-policy",
+      "description": "Нативный checkbox 18px в строке высотой от 44px с пояснением частичного результата; перед управлением файловым заданием.",
+      "html": "<div class=\"ds-file-policy\"><label class=\"ds-file-policy-label\"><input type=\"checkbox\" checked>Пропускать имена, несовместимые с Windows</label><p class=\"ds-file-policy-helper\">Каталог с таким именем пропускается вместе с содержимым. Пропуски записываются в журнал и манифест; копия отмечается как частичная.</p></div>",
+      "css": ".ds-file-policy {color:var(--text, #203047);font:14px/1.45 \"Segoe UI\",system-ui,-apple-system,sans-serif;} .ds-file-policy-label {display:flex;align-items:flex-start;gap:10px;min-height:44px;margin-top:18px;} .ds-file-policy-label input {width:18px;height:18px;margin:2px 0 0;accent-color:var(--accent, #145da3);flex:0 0 auto;font:inherit;} .ds-file-policy-label input:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} .ds-file-policy-helper {margin:8px 0 0;color:var(--secondary, #55647a);font-size:12px;line-height:1.65;overflow-wrap:anywhere;}"
+    },
+    {
+      "name": "Управление заданиями в таблице",
+      "kind": "custom",
+      "refersTo": "row-task-button",
+      "description": "Две группы для файлов и БД: транспорт, запуск, пауза либо продолжение, остановка и отдельная подпись состояния. Кнопки 32 × 38px на широком экране и 44 × 44px до 600px; транспорт 65 × 34px и растягиваемый высотой 44px соответственно.",
+      "html": "<div class=\"ds-row-controls\"><div class=\"ds-row-job\" role=\"group\" aria-label=\"Файлы: сервер примера\"><select class=\"ds-row-transport\" aria-label=\"Транспорт файлов: сервер примера\" title=\"Файлы · FTPS\"><option>FTPS</option><option>HTTPS</option></select><button class=\"ds-row-task-button\" aria-label=\"Запустить\" title=\"Запустить · Файлы · Сервер примера\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8 5l11 7-11 7z\"/></svg></button><button class=\"ds-row-task-button\" aria-label=\"Пауза\" title=\"Пауза · Файлы · Сервер примера\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8 5v14M16 5v14\"/></svg></button><button class=\"ds-row-task-button\" aria-label=\"Остановить\" title=\"Остановить · Файлы · Сервер примера\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M6 6h12v12H6z\"/></svg></button></div><div class=\"ds-row-job\" role=\"group\" aria-label=\"Базы данных: сервер примера\"><span class=\"ds-row-kind\">БД</span><button class=\"ds-row-task-button\" aria-label=\"Запустить\" title=\"Запустить · БД · Сервер примера\" disabled><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8 5l11 7-11 7z\"/></svg></button><button class=\"ds-row-task-button\" aria-label=\"Пауза\" title=\"Пауза · БД · Сервер примера\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M8 5v14M16 5v14\"/></svg></button><button class=\"ds-row-task-button\" aria-label=\"Остановить\" title=\"Остановить · БД · Сервер примера\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M6 6h12v12H6z\"/></svg></button><span class=\"ds-row-task-state\">В работе</span></div></div>",
+      "css": ".ds-row-controls {color:var(--text, #203047);font:14px/1.45 \"Segoe UI\",system-ui,-apple-system,sans-serif;} .ds-row-job {display:grid;grid-template-columns:65px repeat(3,32px);gap:5px;align-items:center;} .ds-row-job + .ds-row-job {margin-top:10px;} .ds-row-kind,.ds-row-transport {font-size:12px;} .ds-row-transport {width:65px;height:34px;padding:3px;border:1px solid var(--line, #dce3ed);border-radius:6px;color:var(--text, #203047);background:var(--surface, #fff);font-family:inherit;line-height:inherit;} .ds-row-task-button {display:inline-flex;align-items:center;justify-content:center;gap:8px;width:32px;min-width:32px;height:34px;min-height:38px;padding:0;border:1px solid transparent;border-radius:6px;background:ButtonFace;color:ButtonText;font:500 14px/1.25 \"Segoe UI\",system-ui,-apple-system,sans-serif;cursor:pointer;transition:background .16s ease-out,border-color .16s ease-out;} .ds-row-task-button svg {width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;} .ds-row-task-state {grid-column:1 / -1;font-size:12px;color:var(--secondary, #55647a);} .ds-row-task-button:disabled {opacity:.55;cursor:default;} .ds-row-task-button:focus-visible,.ds-row-transport:focus-visible {outline:2px solid var(--focus, #1d6fbe);outline-offset:3px;} @media(max-width:600px) {.ds-row-job {grid-template-columns:minmax(65px,1fr) repeat(3,44px);gap:8px;} .ds-row-task-button,.ds-row-transport {height:44px;min-width:44px;} .ds-row-task-button {width:44px;} .ds-row-transport {width:100%;font-size:16px;}} @media(prefers-reduced-motion:reduce) {.ds-row-task-button {transition:none;}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Ясная городская навигация",
+    "overview": "Спокойная локальная рабочая панель помогает оператору узнавать серверы и читать ход передачи. Глубокая синяя навигация задаёт постоянный ориентир. Светлые поверхности, компактные строки и устойчивая иерархия удерживают внимание на состоянии данных.\n\nЭто описание реализованного интерфейса из `src/jino_backup/web/`. Направление выбрано агентом в рамках предоставленной автономии с опорой на `PRODUCT.md` и brief поверхности, seed `f8150ff6c9035497`. Пользователь подтвердил локальный браузер, обычные файлы и папки серверов по логину. Одобрение нового визуального бренда пользователем не зафиксировано.\n\nРасширение от 11 ноября сохраняет эту систему. Карточка сервера, формы, управление заданиями и план работ используют ту же навигацию, Segoe UI, белые поверхности и семантические состояния. Новые токены фиксируют значения готового кода; смена визуального направления не проводилась.",
+    "keyCharacteristics": [
+      "Постоянная синяя навигация и светлая рабочая область.",
+      "Плотная таблица с сохраняемым выбором и связанными подробностями.",
+      "Семантические состояния с текстовыми подписями.",
+      "Системная типографика Windows и табличные цифры.",
+      "Плоские поверхности с тонкими границами."
+    ],
+    "rules": [
+      {
+        "name": "The Подписанное состояние Rule",
+        "body": "Цвет статуса всегда сопровождается читаемой подписью. Очередь, доступ и результат выгрузки получают отдельное представление.",
+        "section": "colors"
+      },
+      {
+        "name": "The Стабильные числа Rule",
+        "body": "Значения, обновляющиеся во время передачи, используют `tabular-nums`.",
+        "section": "typography"
+      },
+      {
+        "name": "The Сохранённый выбор Rule",
+        "body": "Обновление данных сохраняет выбранный сервер и связь строки с подробностями.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do сохранять выбранный сервер при обновлении данных.",
+      "Do сопровождать цвет состояния текстовой подписью.",
+      "Do использовать табличные цифры для изменяющихся чисел.",
+      "Do сохранять доступные имена навигации при скрытии видимого текста.",
+      "Do проверять новые поверхности на широком и узком экране с синтетическими данными."
+    ],
+    "donts": [
+      "Don't превращать ожидание в очереди в визуальное сообщение об отказе соединения.",
+      "Don't показывать общий процент готовности при неизвестном объёме дерева.",
+      "Don't скрывать исходную дату снимка за датой скачивания.",
+      "Don't добавлять декоративное стекло, постерные блоки и bitmap-шрифты в эту рабочую систему."
+    ]
+  }
+}
