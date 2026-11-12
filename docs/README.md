@@ -48,6 +48,7 @@
 | [28_multi_server_budget.md](28_multi_server_budget.md) | Допуск нескольких серверов с резервом общего бюджета 10 сеансов |
 | [29_independent_storage_locks.md](29_independent_storage_locks.md) | Устранение конфликта DOWNLOAD_BUSY файлов и БД, защита миграции |
 | [30_activity_charts.md](30_activity_charts.md) | Минутные графики, скорость сохранения, признаки продвижения и границы истории |
+| [31_historical_https_diagnostics.md](31_historical_https_diagnostics.md) | Прежние HTTPS-ошибки в истории, текущие ошибки без скрытия |
 
 ## Согласованные исходные условия
 

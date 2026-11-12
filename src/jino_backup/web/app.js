@@ -331,7 +331,7 @@ function displayDiagnostics(server, { table = false } = {}) {
       task.progress?.verified_files > 0 ||
       task.progress?.inventory_complete);
   return (server.diagnostics || [])
-    .filter((item) => !(table && item.source === "FTP" && newerFtpsResult))
+    .filter((item) => !(table && (item.source === "Файлы HTTPS" || item.source === "FTP" && newerFtpsResult)))
     .map((item) =>
       item.source === "FTP"
         ? {
@@ -342,6 +342,13 @@ function displayDiagnostics(server, { table = false } = {}) {
               ? item.message
               : item.message +
                 ". Текущее подключение этим результатом не проверено",
+          }
+        : item.source === "Файлы HTTPS"
+        ? {
+            ...item,
+            historical: true,
+            source: "Прежняя выгрузка HTTPS",
+            message: item.message + ". Результат прежнего прохода, не состояние текущего задания",
           }
         : item
     )
