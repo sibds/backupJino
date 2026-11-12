@@ -139,31 +139,66 @@ def test_task_lifecycle_pauses_resumes_and_stops_without_deleting_copies(managem
     assert management.events(1)
 
 
-def test_separate_file_and_db_jobs_never_run_together_for_one_server(management):
+@pytest.mark.parametrize("transport,concurrent", [("ftps", True), ("https_panel", False)])
+def test_file_and_db_jobs_share_server_only_with_independent_transport(management, transport, concurrent):
+    entered = {kind: threading.Event() for kind in ("files", "databases")}
     release = threading.Event()
-    entered = threading.Event()
-    running = []
 
     def runner(server, task, control, progress):
-        assert not running
-        running.append(task["kind"])
-        entered.set()
-        while not release.is_set():
+        entered[task["kind"]].set()
+        while not release.wait(0.01):
             control.checkpoint()
-            release.wait(0.01)
-        running.clear()
         return {"status": "FILES_ONLY" if task["kind"] == "files" else "DB_ONLY"}
 
     management.runner = runner
-    first = management.start(1, "files", {"transport": "ftps"})
-    assert entered.wait(2)
-    second = management.start(1, "databases", {})
-    assert management.task(second["id"])["state"] == "QUEUED"
-    queued = next(task for task in management.plan()["pending"] if task["id"] == second["id"])
-    assert queued["queue_rank"] == 0 and queued["queue_total"] == 1
-    release.set()
+    try:
+        first = management.start(1, "files", {"transport": transport})
+        assert entered["files"].wait(2)
+        second = management.start(1, "databases", {})
+        if concurrent:
+            assert entered["databases"].wait(2)
+        else:
+            assert management.task(second["id"])["state"] == "QUEUED"
+        assert management.start(1, "files", {"transport": transport})["id"] == first["id"]
+    finally:
+        release.set()
     wait_status(management, first["id"], "FINISHED")
     wait_status(management, second["id"], "FINISHED")
+
+
+def test_database_has_reserved_capacity_when_two_file_jobs_are_running(management):
+    rows = [1]
+    for index in (2, 3):
+        rows.append(management.catalog.save(None, {
+            "name": f"Synthetic {index}", "login": f"panel-{index}",
+            "panel_password": "synthetic", "ftp_host": "ftp.example.test",
+            "ftp_login": f"ftp-{index}", "ftp_password": "synthetic",
+            "protocol": "ftps", "ftp_port": 21, "remote_root": "/",
+        })["row"])
+    release = threading.Event()
+    entered = {}
+
+    def runner(server, task, control, progress):
+        entered[(task["row"], task["kind"])].set()
+        while not release.wait(0.01):
+            control.checkpoint()
+        return {"status": "FILES_ONLY" if task["kind"] == "files" else "DB_ONLY"}
+
+    management.runner = runner
+    try:
+        for row in rows:
+            entered[(row, "files")] = threading.Event()
+            management.start(row, "files", {"transport": "ftps"})
+        assert entered[(1, "files")].wait(2)
+        assert entered[(rows[1], "files")].wait(2)
+        assert not entered[(rows[2], "files")].is_set()
+        entered[(1, "databases")] = threading.Event()
+        management.start(1, "databases", {})
+        assert entered[(1, "databases")].wait(2)
+        other_db = management.start(rows[1], "databases", {})
+        assert management.task(other_db["id"])["state"] == "QUEUED"
+    finally:
+        release.set()
 
 
 def test_blocked_server_cannot_start_and_edit_requires_valid_transport(management):
@@ -339,8 +374,11 @@ def test_operator_db_task_reuses_panel_workflow_and_reports_verified_dumps(manag
 
     panel = Panel()
     monkeypatch.setattr("jino_backup.dashboard_runner.JinoPanelBrowser", lambda credentials: panel)
-    task = management.start(1, "databases", {})
-    wait_status(management, task["id"], "FINISHED")
+    from jino_backup.downloads import FileLock
+    account = management.catalog.get(1)["account_ref"]
+    with FileLock(management.data.state_dir / "account_batches" / (account + "-files.lock")):
+        task = management.start(1, "databases", {})
+        wait_status(management, task["id"], "FINISHED")
     result = management.task(task["id"])
     assert result["result"]["status"] == "DB_ONLY"
     assert result["progress"]["expected_count"] == 2

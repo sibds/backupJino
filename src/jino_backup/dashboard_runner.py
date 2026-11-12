@@ -177,10 +177,12 @@ class OperatorRunner:
 
     def __call__(self, server, task, control, progress):
         skip_names = task.get("skip_unsupported_names", server.get("skip_unsupported_names", False))
+        independent_files = task["kind"] == "files" and task["transport"] in {"ftps", "sftp"}
+        lock_suffix = "-files.lock" if independent_files else ".lock"
         with ExitStack() as stack:
             stack.enter_context(
                 FileLock(
-                    self.data.state_dir / "account_batches" / (server["account_ref"] + ".lock")
+                    self.data.state_dir / "account_batches" / (server["account_ref"] + lock_suffix)
                 )
             )
             credentials = self.catalog.credentials(server["row"])

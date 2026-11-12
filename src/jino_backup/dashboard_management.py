@@ -104,7 +104,7 @@ class DashboardManagement:
         self.running = set()
         self.closed = False
         self.timer = None
-        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="backup-operator")
+        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="backup-operator")
         if runner is None:
             from .dashboard_runner import OperatorRunner
 
@@ -419,12 +419,18 @@ class DashboardManagement:
             self.timer.cancel()
             self.timer = None
         all_tasks = self.tasks()
-        busy_rows = {task["row"] for task in all_tasks if task["id"] in self.running}
+        active = [task for task in all_tasks if task["id"] in self.running]
         next_wake = []
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
-            if len(self.running) >= 2:
-                break
-            if task["state"] not in WAITING or task["row"] in busy_rows:
+            if task["state"] not in WAITING:
+                continue
+            limit = 1 if task["kind"] == "databases" else 2
+            if sum(item["kind"] == task["kind"] for item in active) >= limit:
+                continue
+            if any(item["row"] == task["row"] and (
+                item["kind"] == task["kind"]
+                or self._uses_panel(item) and self._uses_panel(task)
+            ) for item in active):
                 continue
             due = self._scheduled_timestamp(task.get("scheduled_at"))
             if due > time.time():
@@ -449,7 +455,7 @@ class DashboardManagement:
                         next_wake.append(policy["next_timestamp"])
                     continue
             self.running.add(task["id"])
-            busy_rows.add(task["row"])
+            active.append(task)
             self._update(
                 task["id"], state="RUNNING", started_at=timestamp(), next_at=None, error_code=None
             )
