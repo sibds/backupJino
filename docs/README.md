@@ -47,6 +47,7 @@
 | [27_parallelism_recovery.md](27_parallelism_recovery.md) | Постепенное восстановление числа FTPS-передач после сбоев |
 | [28_multi_server_budget.md](28_multi_server_budget.md) | Допуск нескольких серверов с резервом общего бюджета 10 сеансов |
 | [29_independent_storage_locks.md](29_independent_storage_locks.md) | Устранение конфликта DOWNLOAD_BUSY файлов и БД, защита миграции |
+| [30_activity_charts.md](30_activity_charts.md) | Минутные графики, скорость сохранения, признаки продвижения и границы истории |
 
 ## Согласованные исходные условия
 
