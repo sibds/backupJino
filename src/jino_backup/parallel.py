@@ -139,6 +139,7 @@ class ParallelCollector:
         self.incomplete = False
         self.inventory_complete = False
         self.transfer_limit = self.connections - 1
+        self.recovery_at = time.monotonic() + 60
         with checkpoint.mutex:
             self.committed = {row["path"]: (row["state"], row["committed"])
                               for row in checkpoint.db.execute("SELECT path,state,committed FROM files")}
@@ -199,6 +200,12 @@ class ParallelCollector:
 
     def committed_file(self, path, state, size):
         with self.mutex:
+            previous_state, previous_size = self.committed.get(path, (None, 0))
+            advanced = size > previous_size or state == "done" and previous_state != "done"
+            now = time.monotonic()
+            if advanced and now >= self.recovery_at and self.transfer_limit < self.connections - 1:
+                self.transfer_limit += 1
+                self.recovery_at = now + 60
             self.committed[path] = (state, size)
             for value in self.active.values():
                 if value["path"] == path:
@@ -213,6 +220,7 @@ class ParallelCollector:
         with self.mutex:
             if event.get("stage") == "RETRY_WAIT":
                 self.transfer_limit = max(1, self.transfer_limit - 1)
+                self.recovery_at = time.monotonic() + 60
             active = [dict(value) for value in self.active.values()]
             values = {"stage": "FILES_DOWNLOAD", "received_bytes": sum(size for _, size in self.committed.values()),
                       "verified_files": sum(state == "done" for state, _ in self.committed.values()),

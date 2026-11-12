@@ -10,6 +10,38 @@ from jino_backup.dashboard_management import TaskControl
 from test_backup import FixtureSource
 
 
+def test_parallelism_recovers_only_after_cooldown_and_confirmed_progress(tmp_path):
+    from jino_backup.parallel import ConnectionBudget, ParallelCollector
+    root = tmp_path / "remote"
+    root.mkdir()
+    (root / "file.txt").write_bytes(b"synthetic")
+    events = []
+    collector = ParallelCollector(TaskControl(lambda state: None), lambda **e: events.append(e),
+        ConnectionBudget(10), connections=4,
+        metadata_factory=lambda *args: FixtureSource(root),
+        download_factory=lambda *args: FixtureSource(root))
+    with DirectoryCheckpoint(tmp_path / "copy", "scope") as checkpoint:
+        collector.collect({}, {"remote_root": "/"}, tmp_path / "copy", checkpoint)
+    collector.emit(stage="RETRY_WAIT")
+    collector.emit(stage="RETRY_WAIT")
+    assert collector.transfer_limit == 1
+    collector.committed_file("file.txt", "done", 9)
+    assert collector.transfer_limit == 1
+    collector.recovery_at = 0
+    collector.committed_file("file.txt", "done", 9)
+    assert collector.transfer_limit == 1, "Unchanged checkpoint is not progress"
+    collector.committed_file("second.txt", "partial", 10)
+    assert collector.transfer_limit == 2
+    collector.committed_file("second.txt", "partial", 11)
+    assert collector.transfer_limit == 2, "Recovery must be gradual"
+    collector.recovery_at = 0
+    collector.committed_file("second.txt", "done", 12)
+    assert collector.transfer_limit == 3
+    collector.recovery_at = 0
+    collector.committed_file("third.txt", "done", 1)
+    assert collector.transfer_limit == 3
+
+
 def test_shared_connection_budget_is_bounded_and_released():
     from jino_backup.parallel import ConnectionBudget
     budget = ConnectionBudget(10)

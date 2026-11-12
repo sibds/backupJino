@@ -44,6 +44,7 @@
 | [24_large_file_recovery.md](24_large_file_recovery.md) | Повторы больших файлов с учётом подтверждённого продвижения, диагностика libcurl и сохранение очереди |
 | [25_documentation_review.md](25_documentation_review.md) | Актуализация документации, сверка с кодом и демонстрационный снимок без клиентских данных |
 | [26_independent_database_queue.md](26_independent_database_queue.md) | Отдельный слот БД, параллельные FTPS/SFTP и БД одного сервера, проверки |
+| [27_parallelism_recovery.md](27_parallelism_recovery.md) | Постепенное восстановление числа FTPS-передач после сбоев |
 
 ## Согласованные исходные условия
 
