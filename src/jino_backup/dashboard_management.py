@@ -104,7 +104,7 @@ class DashboardManagement:
         self.running = set()
         self.closed = False
         self.timer = None
-        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="backup-operator")
+        self.executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="backup-operator")
         if runner is None:
             from .dashboard_runner import OperatorRunner
 
@@ -424,9 +424,13 @@ class DashboardManagement:
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
                 continue
-            limit = 1 if task["kind"] == "databases" else 2
+            limit = 1 if task["kind"] == "databases" else 5
             if sum(item["kind"] == task["kind"] for item in active) >= limit:
                 continue
+            if task["kind"] == "files":
+                reserved = sum(self._file_slots(item) for item in active)
+                if reserved + self._file_slots(task) > 10:
+                    continue
             if any(item["row"] == task["row"] and (
                 item["kind"] == task["kind"]
                 or self._uses_panel(item) and self._uses_panel(task)
@@ -469,6 +473,12 @@ class DashboardManagement:
     def _wake(self):
         with self.lock:
             self._schedule()
+
+    @staticmethod
+    def _file_slots(task):
+        if task["kind"] != "files":
+            return 0
+        return task.get("ftp_connections", 3) if task["transport"] == "ftps" else 1
 
     @staticmethod
     def _uses_panel(task):

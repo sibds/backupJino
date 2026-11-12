@@ -166,14 +166,18 @@ def test_file_and_db_jobs_share_server_only_with_independent_transport(managemen
     wait_status(management, second["id"], "FINISHED")
 
 
-def test_database_has_reserved_capacity_when_two_file_jobs_are_running(management):
+@pytest.mark.parametrize("connections", [2, 3, 5])
+def test_database_has_reserved_capacity_when_ftps_budget_is_reserved(management, connections):
     rows = [1]
-    for index in (2, 3):
+    capacity = 10 // connections
+    management.save_server(1, {"ftp_connections": connections})
+    for index in range(2, capacity + 2):
         rows.append(management.catalog.save(None, {
             "name": f"Synthetic {index}", "login": f"panel-{index}",
             "panel_password": "synthetic", "ftp_host": "ftp.example.test",
             "ftp_login": f"ftp-{index}", "ftp_password": "synthetic",
             "protocol": "ftps", "ftp_port": 21, "remote_root": "/",
+            "ftp_connections": connections,
         })["row"])
     release = threading.Event()
     entered = {}
@@ -189,16 +193,21 @@ def test_database_has_reserved_capacity_when_two_file_jobs_are_running(managemen
         for row in rows:
             entered[(row, "files")] = threading.Event()
             management.start(row, "files", {"transport": "ftps"})
-        assert entered[(1, "files")].wait(2)
-        assert entered[(rows[1], "files")].wait(2)
-        assert not entered[(rows[2], "files")].is_set()
+        for row in rows[:capacity]:
+            assert entered[(row, "files")].wait(2)
+        assert not entered[(rows[capacity], "files")].is_set()
         entered[(1, "databases")] = threading.Event()
         management.start(1, "databases", {})
         assert entered[(1, "databases")].wait(2)
+        entered[(rows[1], "databases")] = threading.Event()
         other_db = management.start(rows[1], "databases", {})
         assert management.task(other_db["id"])["state"] == "QUEUED"
     finally:
         release.set()
+    for row in rows:
+        task = next(item for item in management.tasks(row) if item["kind"] == "files")
+        wait_status(management, task["id"], "FINISHED")
+    wait_status(management, other_db["id"], "FINISHED")
 
 
 def test_blocked_server_cannot_start_and_edit_requires_valid_transport(management):
