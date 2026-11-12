@@ -76,6 +76,7 @@ def main():
                 expect(page.locator('#server-rows .activity-row-speed').first).to_contain_text(re.compile('[МК]Б/с'))
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
                 page.locator('.activity-history summary').click()
+                page.evaluate('window.scrollTo(0,0)')
                 page.screenshot(path=str(captures / f'activity-{width}.png'), full_page=True)
                 page.evaluate('''() => {
                     activity.previous.time -= 20000;

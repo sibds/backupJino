@@ -1864,3 +1864,105 @@ progress::-moz-progress-bar {
     scroll-behavior: auto !important;
   }
 }
+/* Servers surface only. Shared navigation, other views and all tables retain their styles. */
+.server-summary { display: contents; }
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary {
+  display: grid;
+  grid-template-columns: minmax(270px, .9fr) minmax(0, 1.4fr);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 20px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-overview {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 22px 24px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-info p {
+  font-size: 12px;
+  line-height: 1.55;
+  max-width: 48ch;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-totals {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  width: 100%;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-totals dd {
+  font-size: 22px;
+  margin-top: 5px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .overall-progress {
+  margin: 0;
+  padding: 22px 24px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .overall-progress .helper {
+  font-size: 12px;
+  line-height: 1.55;
+  margin-top: 8px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .overall-files {
+  margin-top: 14px;
+  padding-top: 12px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-panel {
+  padding: 20px 24px 12px;
+  margin-bottom: 20px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-charts {
+  gap: 36px;
+  margin: 20px 0 12px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-speed strong {
+  font-size: 24px;
+  line-height: 1.25;
+  color: var(--accent);
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-charts figcaption {
+  align-items: baseline;
+  min-height: 24px;
+}
+body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-charts figcaption > span {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+.activity-method { font-size: 12px; color: var(--secondary); }
+.activity-method summary { cursor: pointer; min-height: 44px; padding: 12px 0; }
+.activity-method summary:hover { color: var(--text); }
+.activity-method .helper { max-width: 85ch; padding: 0 0 12px; margin: 0; line-height: 1.6; }
+.activity-method summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 3px; }
+@media (max-width: 1000px) {
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-overview { gap: 16px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .overall-progress {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+@media (max-width: 600px) {
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-overview,
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .overall-progress { padding: 16px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-totals { gap: 10px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-totals dt { font-size: 11px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary .run-totals dd { font-size: 19px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-panel { padding: 16px 16px 8px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-charts { gap: 22px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-heading { gap: 16px; }
+  body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .activity-speed strong { font-size: 22px; }
+}
