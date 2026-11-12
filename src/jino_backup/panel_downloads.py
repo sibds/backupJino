@@ -11,7 +11,7 @@ from pathlib import Path
 from .downloads import DirectoryCheckpoint,FileLock,local_path
 from .errors import BackupError
 from .importers import identity
-from .server_folders import server_directory
+from .server_folders import server_work
 from .state import write_json
 from .storage import CHUNK,sha256_file
 from .transfer import Entry,collect_files,relative_path,safe_name,name_compatibility_issue
@@ -171,8 +171,7 @@ class PanelFileJob:
             if self.state_dir:
                 account=self.server_id.replace('server-','panel-',1)
                 stack.enter_context(FileLock(self.state_dir/'panel_jobs'/(account+'.lock')))
-            stack.enter_context(FileLock(local_path(self.destination,'.jino-locks/'+self.server_id+'.lock')))
-            server=server_directory(self.destination,self.server_id,self.folder_name)
+            server=stack.enter_context(server_work(self.destination,self.server_id,self.folder_name,'files'))
             output=local_path(server,self.job_id)
             with DirectoryCheckpoint(output,self.scope,self.notify) as progress:
                 manifest_path=local_path(output,'manifest.json')

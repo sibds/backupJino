@@ -4,7 +4,7 @@ import json
 import re
 import unicodedata
 from collections import Counter
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .downloads import FileLock,local_path
@@ -108,6 +108,18 @@ def server_directory(destination,server_id,folder_name,*,dry_run=False):
     return target
 
 
+@contextmanager
+def server_work(destination, server_id, folder_name, kind):
+    safe_id(server_id)
+    if kind not in {"files", "databases"}:
+        raise BackupError("REQUEST_INVALID")
+    with FileLock(local_path(destination, '.jino-locks/' + server_id + '-' + kind + '.lock')):
+        with FileLock(local_path(destination, '.jino-locks/' + server_id + '.lock')):
+            directory = (server_directory(destination, server_id, folder_name) if folder_name
+                         else local_path(destination, server_id))
+        yield directory
+
+
 def migrate_folders(rows,mapping,destination,state_dir,*,execute=False):
     source_ids=[row.get(mapping.get('id','')) for row in rows]
     if any(not isinstance(x,str) or not x for x in source_ids) or len(set(source_ids))!=len(rows):
@@ -126,6 +138,8 @@ def migrate_folders(rows,mapping,destination,state_dir,*,execute=False):
             account_ref=server_id.replace('server-','panel-',1)
             with ExitStack() as stack:
                 stack.enter_context(FileLock(Path(state_dir)/'panel_jobs'/(account_ref+'.lock')))
+                for kind in ('files', 'databases'):
+                    stack.enter_context(FileLock(local_path(root,'.jino-locks/'+server_id+'-'+kind+'.lock')))
                 stack.enter_context(FileLock(local_path(root,'.jino-locks/'+server_id+'.lock')))
                 server_directory(root,server_id,name)
         results.append({'row':index,'server_id':server_id,'action':status})

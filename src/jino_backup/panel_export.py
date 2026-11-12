@@ -18,7 +18,7 @@ from .errors import BackupError
 from .importers import identity
 from .state import private_dir, replace_with_retry, safe_id, write_json
 from .storage import sha256_file
-from .server_folders import server_directory
+from .server_folders import server_work
 
 
 def atomic_bytes(path, value):
@@ -142,8 +142,7 @@ class PanelExportJob:
         with ExitStack() as stack:
             stack.enter_context(FileLock(self.root / (self.account_ref + '.lock')))
             if self.server_folder:
-                stack.enter_context(FileLock(local_path(self.destination,'.jino-locks/'+self.server_id+'.lock')))
-                server_directory(self.destination,self.server_id,self.server_folder)
+                stack.enter_context(server_work(self.destination, self.server_id, self.server_folder, 'databases'))
             self._load()
             try:
                 if self.state['phase']=='DB_ONLY':

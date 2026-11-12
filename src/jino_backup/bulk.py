@@ -13,7 +13,7 @@ from .state import private_dir, safe_root, write_json
 from .storage import sha256_file
 from .transfer import collect_files, source_for
 from .retry import RecoveringSource, retry_call
-from .server_folders import folder_names,server_directory
+from .server_folders import folder_names,server_work
 
 
 @dataclass
@@ -94,12 +94,10 @@ class DownloadBatch:
         self.report_path = self.destination / (self.run_id + '.json')
 
     def _download(self, server):
-        with FileLock(local_path(self.destination, '.jino-locks/' + server.server_id + '.lock')):
-            return self._download_locked(server)
+        with server_work(self.destination, server.server_id, server.folder_name, 'files') as directory:
+            return self._download_locked(server, directory)
 
-    def _download_locked(self, server):
-        directory=(server_directory(self.destination,server.server_id,server.folder_name)
-                   if server.folder_name else local_path(self.destination,server.server_id))
+    def _download_locked(self, server, directory):
         snapshot = local_path(directory,self.run_id)
         scope = identity('scope', server.server_id, server.credentials['host'],
                          server.credentials['username'], server.credentials['port'],

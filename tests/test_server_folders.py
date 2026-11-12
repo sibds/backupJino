@@ -146,3 +146,31 @@ def test_cli_folder_migration_dry_run_never_exposes_logins(tmp_path):
     assert real.returncode==0 and json.loads(real.stdout)['renamed']==1
     assert (root/'private-client-login'/'download-example'/'keep.bin').exists()
     assert 'private-client-login' not in dry.stdout+real.stdout+dry.stderr+real.stderr
+def test_file_transfer_and_database_export_use_independent_locks(tmp_path):
+    from cryptography.fernet import Fernet
+    from jino_backup.server_folders import server_work
+    from jino_backup.panel_export import PanelExportJob
+    from test_panel_export import PanelFixture
+    panel = PanelFixture()
+    destination = tmp_path / "copies"
+    with server_work(destination, "server-example", "client-login", "files"):
+        job = PanelExportJob(tmp_path / "state", destination, "panel-example", "request-1",
+            "2026-11-10", Fernet.generate_key(), lambda: panel,
+            server_folder="client-login")
+        assert job.run()["status"] == "DB_ONLY"
+        assert len(panel.exports) == 2
+        assert not panel.deleted
+        with pytest.raises(BackupError, match="DOWNLOAD_BUSY"):
+            with server_work(destination, "server-example", "client-login", "files"):
+                pass
+
+
+@pytest.mark.parametrize('kind', ['files', 'databases'])
+def test_migration_cannot_run_during_server_work(tmp_path, kind):
+    from jino_backup.server_folders import server_work, migrate_folders
+    from jino_backup.importers import identity
+    rows = [{'id': 'synthetic', 'login': 'client-login'}]
+    with server_work(tmp_path / 'copies', identity('server', 'synthetic'), 'client-login', kind):
+        with pytest.raises(BackupError, match='DOWNLOAD_BUSY'):
+            migrate_folders(rows, {'id': 'id', 'login': 'login'}, tmp_path / 'copies',
+                            tmp_path / 'state', execute=True)
