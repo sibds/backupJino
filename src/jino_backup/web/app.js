@@ -1,5 +1,78 @@
 "use strict";
+// Numeric observation history only: no names, credentials or remote paths.
+globalThis.BackupActivity = class BackupActivity {
+  constructor(saved) {
+    this.previous = null; // A reload starts a fresh measurement; never backfill a closed tab.
+    this.minutes = Array.isArray(saved?.minutes) ? saved.minutes.filter(x => x && Number.isFinite(x.time) && x.rows).slice(-60) : [];
+    this.recent = [];
+    this.advanced = saved?.advanced || {};
+    this.started = saved?.started || null;
+  }
+  observe(data, now) {
+    const counters = {};
+    for (const server of data.servers || []) {
+      for (const [kind, task] of Object.entries(server.latest_tasks || {})) {
+        if (!task?.id) continue;
+        const p = task.progress || {};
+        counters[server.row + ':' + kind] = {
+          id: task.id, row: server.row, state: task.state,
+          bytes: Math.max(0, Number(p.received_bytes) || 0),
+          files: kind === 'files' ? Math.max(0, Number(p.verified_files) || 0) : 0,
+        };
+      }
+    }
+    const previous = this.previous;
+    this.previous = {time: now, counters};
+    this.started ||= now;
+    if (!previous || now <= previous.time || now - previous.time > 15000) {
+      this.recent = [];
+      return;
+    }
+    const rows = {};
+    for (const [key, counter] of Object.entries(counters)) {
+      const old = previous.counters[key];
+      const value = rows[counter.row] ||= {bytes: 0, files: 0};
+      if (!old || old.id !== counter.id || counter.bytes < old.bytes || counter.files < old.files) continue;
+      if (![old.state, counter.state].some(s => ['RUNNING', 'PAUSING', 'STOPPING'].includes(s))) continue;
+      value.bytes += counter.bytes - old.bytes;
+      value.files += counter.files - old.files;
+      if (counter.bytes > old.bytes || counter.files > old.files) this.advanced[counter.row] = now;
+    }
+    this.recent.push({time: now, seconds: (now - previous.time) / 1000, rows});
+    this.recent = this.recent.filter(x => x.time > now - 30000);
+    const minute = Math.floor(now / 60000) * 60000;
+    let bucket = this.minutes.find(x => x.time === minute);
+    if (!bucket) {
+      bucket = {time: minute, bytes: 0, files: 0, rows: {}};
+      this.minutes.push(bucket);
+    }
+    for (const [row, value] of Object.entries(rows)) {
+      bucket.bytes += value.bytes;
+      bucket.files += value.files;
+      const target = bucket.rows[row] ||= {bytes: 0, files: 0};
+      target.bytes += value.bytes;
+      target.files += value.files;
+    }
+    this.minutes = this.minutes.filter(x => x.time > now - 3600000).slice(-60);
+  }
+  row(row, now) {
+    const fresh = this.previous && now - this.previous.time <= 15000;
+    const samples = fresh ? this.recent.filter(x => x.time > now - 30000 && (row === null || x.rows[row])) : [];
+    const seconds = samples.reduce((n, x) => n + x.seconds, 0);
+    const total = samples.reduce((n, x) => n + (row === null
+      ? Object.values(x.rows).reduce((s, v) => s + v.bytes, 0) : x.rows[row].bytes), 0);
+    const minute = this.minutes.find(x => x.time === Math.floor(now / 60000) * 60000);
+    const values = row === null ? minute : minute?.rows[row];
+    return {speed: seconds ? total / seconds : null, bytes: values?.bytes ?? null,
+      files: values?.files ?? null, advanced: row === null
+        ? Math.max(0, ...Object.values(this.advanced)) || null : this.advanced[row] || null};
+  }
+  save() { return {minutes: this.minutes, advanced: this.advanced, started: this.started}; }
+};
 const $ = (id) => document.getElementById(id);
+let activity;
+try { activity = new BackupActivity(JSON.parse(localStorage.getItem('jino-activity-v1'))); }
+catch { activity = new BackupActivity(); }
 const state = {
   data: null,
   selected: null,
@@ -664,6 +737,17 @@ function renderTable() {
         element("span", "availability-sub", work.parts.join(" · "))
       );
     }
+    const movement = activity.row(server.row, Date.now());
+    const speedLine = element("span", "availability-sub activity-row-speed", formatSpeed(movement.speed));
+    speedLine.title = "Средняя скорость сохранения за последние 30 секунд наблюдения";
+    const movementLine = element("span", "availability-sub",
+      movement.files === null ? "Собираем данные о движении" :
+      `За эту минуту: +${count(movement.files)} файлов · ${formatMB(movement.bytes)} МБ`);
+    const lastLine = element("span", "availability-sub",
+      movement.advanced ? "Последний прирост: " + age(new Date(movement.advanced).toISOString()) : "Прирост пока не зафиксирован");
+    const activityCell = element("div", "server-activity");
+    activityCell.append(speedLine, movementLine, lastLine);
+    if (server.latest_tasks && Object.keys(server.latest_tasks).length) nameCell.append(activityCell);
     tr.append(sizeCell);
     tr.append(rowControls(server));
     fragment.append(tr);
@@ -879,6 +963,72 @@ function render() {
     renderDetail();
   }
 }
+function formatMB(value) {
+  return value === null ? "—" : (value / 1000000).toLocaleString("ru-RU", {maximumFractionDigits: 2});
+}
+function formatSpeed(value) {
+  if (value === null) return "Нет замера скорости";
+  if (value === 0) return "0 КБ/с";
+  return value >= 1000000 ? formatMB(value) + " МБ/с" :
+    (value / 1000).toLocaleString("ru-RU", {maximumFractionDigits: 1}) + " КБ/с";
+}
+function activityChart(id, buckets, field) {
+  const svg = $(id);
+  if (!svg) return;
+  const ns = "http://www.w3.org/2000/svg";
+  const fragment = document.createDocumentFragment();
+  const max = Math.max(1, ...buckets.map(x => x?.[field] || 0));
+  const description = document.createElementNS(ns, "title");
+  description.textContent = field === "bytes" ? "Загруженные МБ по минутам; точные значения в таблице ниже" : "Проверенные файлы по минутам; точные значения в таблице ниже";
+  fragment.append(description);
+  const grid = document.createElementNS(ns, "line");
+  for (const [key, value] of Object.entries({x1:0, x2:600, y1:109, y2:109})) grid.setAttribute(key, value);
+  grid.setAttribute("class", "activity-baseline"); fragment.append(grid);
+  const scale = document.createElementNS(ns, "text");
+  scale.setAttribute("x", "0"); scale.setAttribute("y", "12"); scale.setAttribute("class", "activity-scale");
+  scale.textContent = field === "bytes" ? formatMB(max === 1 ? 0 : max) + " МБ" : count(max === 1 && !buckets.some(x => x?.files) ? 0 : max) + " файлов";
+  fragment.append(scale);
+  buckets.forEach((bucket, index) => {
+    const bar = document.createElementNS(ns, "rect");
+    const height = bucket ? Math.max(2, (bucket[field] / max) * 84) : 2;
+    for (const [key,value] of Object.entries({x:index * 20 + 3, y:109-height, width:14, height})) bar.setAttribute(key,value);
+    bar.setAttribute("class", !bucket ? "activity-missing" : field === "files" ? "activity-file-bar" : "activity-byte-bar");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = bucket ? new Date(bucket.time).toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"}) + ": " +
+      (field === "bytes" ? formatMB(bucket.bytes) + " МБ" : count(bucket.files) + " файлов") : "Нет наблюдений";
+    bar.append(title); fragment.append(bar);
+  });
+  svg.replaceChildren(fragment);
+}
+function renderActivity() {
+  if (!$("activity-heading")) return;
+  const now = Date.now(), current = Math.floor(now / 60000) * 60000;
+  const overall = activity.row(null, now);
+  text("activity-speed", formatSpeed(overall.speed));
+  text("activity-volume", formatMB(overall.bytes) + " МБ");
+  text("activity-files", overall.files === null ? "—" : count(overall.files) + " файлов");
+  const fresh = activity.previous && now - activity.previous.time <= 15000;
+  text("activity-status", !fresh ? "Нет свежих наблюдений: включите автообновление или нажмите «Обновить»." :
+    overall.speed === null ? "Первый замер получен. Скорость появится после следующего обновления." :
+    overall.advanced ? "Последний прирост: " + age(new Date(overall.advanced).toISOString()) : "Данные обновляются; прирост файлов и байтов пока не зафиксирован.");
+  const buckets = Array.from({length:30}, (_, i) => activity.minutes.find(x => x.time === current - (29-i)*60000));
+  activityChart("activity-bytes-chart", buckets, "bytes");
+  activityChart("activity-files-chart", buckets, "files");
+  const fragment = document.createDocumentFragment();
+  for (let i=29; i>=0; i--) {
+    const bucket = buckets[i];
+    if (!bucket) continue;
+    const tr = element("tr");
+    tr.append(element("td", "", new Date(bucket.time).toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"}) + (bucket.time === current ? " · идёт" : "")),
+      element("td", "", formatMB(bucket.bytes)), element("td", "", count(bucket.files)));
+    fragment.append(tr);
+  }
+  if (!fragment.childNodes.length) {
+    const tr = element("tr"), td = element("td", "", "История появится после второго замера.");
+    td.colSpan=3; tr.append(td); fragment.append(tr);
+  }
+  $("activity-history-rows").replaceChildren(fragment);
+}
 async function refresh() {
   if (state.loading) return;
   state.loading = true;
@@ -893,8 +1043,11 @@ async function refresh() {
     if (!response.ok)
       throw new Error(response.status === 401 ? "SESSION" : "READ");
     state.data = await response.json();
+    activity.observe(state.data, Date.now());
+    try { localStorage.setItem('jino-activity-v1', JSON.stringify(activity.save())); } catch { /* Storage is optional. */ }
     $("connection-error").hidden = true;
     render();
+    renderActivity();
     document.dispatchEvent(
       new CustomEvent("backup:state", { detail: state.data })
     );
@@ -906,6 +1059,8 @@ async function refresh() {
         : "Данные временно не обновляются. Выгрузка работает отдельно; попробуйте «Обновить»."
     );
     $("connection-error").hidden = false;
+    renderActivity();
+    if (state.data) renderTable();
   } finally {
     clearTimeout(timer);
     state.loading = false;
@@ -1009,6 +1164,7 @@ $("copy-folder").addEventListener("click", async () => {
 });
 setInterval(() => {
   if ($("auto-refresh").checked && !document.hidden) refresh();
+  else if (!document.hidden) { renderActivity(); if (state.data && state.view === "servers") renderTable(); }
 }, 3000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && $("auto-refresh").checked) refresh();

@@ -182,6 +182,25 @@
           </div>
         </section>
         <section id="server-view">
+          <section class="activity-panel" aria-labelledby="activity-heading">
+            <div class="activity-heading">
+              <div><h2 id="activity-heading">Активность загрузки</h2>
+                <p class="helper" id="activity-status">Наблюдение начинается после обновления данных.</p></div>
+              <div class="activity-speed"><span>Скорость сохранения</span><strong id="activity-speed">—</strong></div>
+            </div>
+            <div class="activity-charts">
+              <figure><figcaption><strong>Загружено за минуту</strong><span id="activity-volume">—</span></figcaption>
+                <svg id="activity-bytes-chart" viewBox="0 0 600 110" role="img" aria-label="Поминутный прирост подтверждённого объёма"></svg>
+                <div class="activity-axis"><span id="activity-start">30 минут назад</span><span>Сейчас · неполная минута</span></div></figure>
+              <figure><figcaption><strong>Файлов проверено за минуту</strong><span id="activity-files">—</span></figcaption>
+                <svg id="activity-files-chart" viewBox="0 0 600 110" role="img" aria-label="Поминутный прирост проверенных файлов"></svg>
+                <div class="activity-axis"><span>Последние 30 минут</span><span>Сейчас · неполная минута</span></div></figure>
+            </div>
+            <p class="helper">Скорость — по подтверждённым байтам за последние 30 секунд, не сетевой трафик. МБ = 1 000 000 байт. История записывается, пока панель открыта, и хранится в этом браузере до часа. Разрывы наблюдения — без данных.</p>
+            <details class="activity-history"><summary>Поминутные значения</summary>
+              <div class="activity-history-scroll"><table><thead><tr><th>Минута</th><th>Загружено, МБ</th><th>Файлов проверено</th></tr></thead><tbody id="activity-history-rows"></tbody></table></div>
+            </details>
+          </section>
           <div class="tools-row">
             <label class="reason-filter"
               ><span class="sr-only">Причина ошибки</span

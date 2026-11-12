@@ -23,6 +23,42 @@
   background: var(--canvas);
   font-synthesis: none;
 }
+.activity-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin: 0 0 24px;
+}
+.activity-heading { display:flex; justify-content:space-between; gap:24px; align-items:flex-start; }
+.activity-heading h2 { font-size:17px; margin:0 0 6px; }
+.activity-heading p { margin:0; }
+.activity-speed { display:grid; gap:4px; text-align:right; flex-shrink:0; }
+.activity-speed span { color:var(--secondary); font-size:12px; }
+.activity-speed strong { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; }
+.activity-charts { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:32px; margin:22px 0 16px; }
+.activity-charts figure { margin:0; min-width:0; }
+.activity-charts figcaption { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; font-size:13px; margin-bottom:8px; }
+.activity-charts figcaption span { color:var(--secondary); font-variant-numeric:tabular-nums; }
+.activity-charts svg { display:block; width:100%; height:auto; overflow:visible; }
+.activity-byte-bar { fill:var(--accent); }
+.activity-file-bar { fill:var(--good); }
+.activity-missing { fill:var(--line); }
+.activity-baseline { stroke:var(--line); }
+.activity-scale { fill:var(--secondary); font-size:12px; }
+.activity-axis { display:flex; justify-content:space-between; gap:12px; color:var(--secondary); font-size:11px; margin-top:6px; }
+.activity-history { margin-top:12px; font-size:12px; }
+.activity-history summary { cursor:pointer; padding:12px 0; min-height:44px; color:var(--accent); }
+.activity-history-scroll { overflow:auto; max-height:230px; }
+.activity-history table { width:100%; min-width:0; font-variant-numeric:tabular-nums; }
+.activity-history td,.activity-history th { padding:8px 12px; }
+.activity-row-speed { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; margin-top:8px; }
+@media (max-width:800px) {
+  .activity-panel { padding:16px; }
+  .activity-charts { grid-template-columns:minmax(0,1fr); gap:22px; }
+  .activity-heading { flex-wrap:wrap; gap:12px; }
+  .activity-speed { text-align:left; }
+}
 .file-name-policy {
   display: flex;
   align-items: flex-start;
