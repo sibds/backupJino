@@ -99,6 +99,26 @@ def main():
                 expect(page.locator("#server-rows tr")).to_have_count(6)
                 expect(page.locator("#server-rows")).to_contain_text("demo-01")
                 expect(page.locator("#demo-banner")).to_be_visible()
+                page.evaluate('''() => {
+                    activity = new BackupActivity();
+                    const now = Date.now();
+                    for (let i=0; i<=240; i++) {
+                        const sample = structuredClone(state.data);
+                        for (const server of sample.servers) {
+                            for (const [kind, task] of Object.entries(server.latest_tasks || {})) {
+                                if (task.state !== 'RUNNING') continue;
+                                const p = task.progress;
+                                p.received_bytes = (p.received_bytes || 0) +
+                                    Math.round(i*2200000 + Math.sin(i/9)*6000000);
+                                if (kind === 'files') p.verified_files = (p.verified_files || 0) + Math.floor(i/12)*7;
+                            }
+                        }
+                        activity.observe(sample, now-(240-i)*5000);
+                    }
+                    renderActivity(); renderTable();
+                    document.getElementById('demo-banner').textContent =
+                        'Демонстрационные данные. Серверы, пути и история графиков — искусственные примеры.';
+                }''')
                 assert not errors, errors
                 assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
                 page.locator("#auto-refresh").blur()
