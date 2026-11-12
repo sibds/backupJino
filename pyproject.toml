@@ -7,7 +7,7 @@ name = "jino-backup-manager"
 version = "0.1.0"
 description = "Verified, encrypted backups of client websites"
 requires-python = ">=3.11"
-dependencies = ["cryptography>=44.0.2,<47", "certifi>=2024.8.30"]
+dependencies = ["cryptography>=44.0.2,<47", "certifi>=2024.8.30", "pycurl>=7.45.4,<8"]
 
 [project.optional-dependencies]
 panel = ["playwright>=1.51,<2"]

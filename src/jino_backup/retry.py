@@ -2,17 +2,19 @@
 import time
 from datetime import datetime, timedelta, timezone
 
-from .errors import BackupError
+from .errors import BackupError, CURL_ERROR_KINDS
 
 RETRY_DELAYS = (2, 4, 8, 16, 32)
 DEFAULT_WAIT = time.sleep
 TRANSIENT_ERRORS = frozenset({"TRANSFER_INTERRUPTED", "CONNECTION_FAILED", "SFTP_CONNECTION_FAILED"})
 
 
-def retry_call(operation, *, reconnect=None, wait=None, notify=None, phase="FILES_DOWNLOAD"):
+def retry_call(operation, *, reconnect=None, wait=None, notify=None, phase="FILES_DOWNLOAD", progress=None):
     wait = wait or DEFAULT_WAIT
     notify = notify or (lambda **values: None)
-    for attempt in range(len(RETRY_DELAYS) + 1):
+    attempt, total = 0, 0
+    committed = progress() if progress else 0
+    while True:
         try:
             if attempt and reconnect:
                 notify(stage="RECONNECT", log=True, retry_attempt=attempt, retry_limit=len(RETRY_DELAYS))
@@ -24,16 +26,34 @@ def retry_call(operation, *, reconnect=None, wait=None, notify=None, phase="FILE
         except BackupError as error:
             if error.code not in TRANSIENT_ERRORS:
                 raise
+            details = {}
+            if error.details.get("operation") in {"CONNECT", "CWD", "PWD", "MLSD", "RETR"}:
+                details["operation"] = error.details["operation"]
+            for key, minimum, maximum in (("ftp_reply_code", 100, 599), ("curl_error_code", 1, 999)):
+                value = error.details.get(key)
+                if type(value) is int and minimum <= value <= maximum:
+                    details[key] = value
+            if error.details.get("curl_error_kind") in CURL_ERROR_KINDS:
+                details["curl_error_kind"] = error.details["curl_error_kind"]
+            if progress:
+                current = progress()
+                advanced = current > committed
+                if advanced:
+                    attempt = 0
+                committed = current
+                details.update(committed_bytes=current, progress_advanced=advanced)
             if attempt == len(RETRY_DELAYS):
                 notify(stage="RETRY_EXHAUSTED", log=True, error_code=error.code,
                        retry_attempt=attempt, retry_limit=len(RETRY_DELAYS),
-                       retry_at=None, retry_delay_seconds=0)
+                       retry_at=None, retry_delay_seconds=0, retry_total=total, **details)
                 raise
             delay = RETRY_DELAYS[attempt]
+            attempt += 1
+            total += 1
             notify(stage="RETRY_WAIT", log=True, error_code=error.code,
-                   retry_attempt=attempt + 1, retry_limit=len(RETRY_DELAYS),
+                   retry_attempt=attempt, retry_limit=len(RETRY_DELAYS), retry_total=total,
                    retry_delay_seconds=delay,
-                   retry_at=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat())
+                   retry_at=(datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(), **details)
             wait(delay)
 
 

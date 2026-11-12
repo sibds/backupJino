@@ -33,6 +33,8 @@ def name_compatibility_issue(name):
     if (not isinstance(name, str) or not name or name in {".", ".."}
             or re.search(r'[\x00-\x1f\x7f/\\]', name)):
         raise BackupError("REMOTE_PATH_UNSAFE")
+    if re.search(r'[\ud800-\udfff]', name):
+        return "INVALID_UTF8_NAME"
     if re.search(r'[:<>"|?*]', name):
         return "WINDOWS_CHARACTERS"
     if name[-1] in {".", " "}:
@@ -40,6 +42,11 @@ def name_compatibility_issue(name):
     if re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?", name):
         return "WINDOWS_RESERVED_NAME"
     return None
+
+
+def display_remote_path(path):
+    """Escape undecodable name bytes for private diagnostics, never for commands."""
+    return path.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def safe_name(name):
@@ -56,6 +63,26 @@ def relative_path(value):
     return value
 
 
+class ListingFTP_TLS(ftplib.FTP_TLS):
+    def retrlines(self, cmd, callback=None):
+        if cmd.split(" ", 1)[0].upper() != "MLSD":
+            return super().retrlines(cmd, callback)
+        self.sendcmd("TYPE A")
+        with self.transfercmd(cmd) as connection:
+            with connection.makefile("r", encoding=self.encoding, errors="surrogateescape") as stream:
+                while True:
+                    line = stream.readline(self.maxline + 1)
+                    if len(line) > self.maxline:
+                        raise BackupError("TRANSFER_LIMIT_EXCEEDED")
+                    if not line:
+                        break
+                    if callback:
+                        callback(line.removesuffix("\n").removesuffix("\r"))
+            if isinstance(connection, ssl.SSLSocket):
+                connection.unwrap()
+        return self.voidresp()
+
+
 class FtpsSource:
     def __init__(self, credentials, site):
         self.credentials = credentials
@@ -70,7 +97,7 @@ class FtpsSource:
         self.close()
         # A dedicated CA bundle avoids stale cross-signed intermediates in the
         # Windows store while retaining chain and hostname verification.
-        self.ftp = ftplib.FTP_TLS(
+        self.ftp = ListingFTP_TLS(
             context=ssl.create_default_context(cafile=certifi.where()), timeout=30
         )
         phase = 'login'
@@ -110,15 +137,39 @@ class FtpsSource:
     def _cwd(self, relative):
         relative_path(relative)
         path = posixpath.join(self.canonical_root, relative)
-        self.ftp.cwd(path)
-        canonical = self.ftp.pwd().rstrip("/") or "/"
+        try:
+            self.ftp.cwd(path)
+        except ftplib.error_perm as error:
+            raise self._listing_rejection(error, "CWD") from None
+        try:
+            canonical = self.ftp.pwd().rstrip("/") or "/"
+        except ftplib.error_perm as error:
+            raise self._listing_rejection(error, "PWD") from None
         if self.canonical_root != "/" and canonical != self.canonical_root and not canonical.startswith(self.canonical_root + "/"):
             raise BackupError("REMOTE_PATH_UNSAFE")
 
+    @staticmethod
+    def _listing_rejection(error, operation):
+        reply = str(error)[:3]
+        details = {"operation": operation}
+        if reply.isascii() and reply.isdigit():
+            details["ftp_reply_code"] = int(reply)
+        code = (
+            "REMOTE_LIST_UNSUPPORTED" if operation == "MLSD" and reply in {"500", "502", "504"}
+            else "REMOTE_DIRECTORY_UNAVAILABLE" if reply == "550"
+            else "FTP_LOGIN_DENIED" if reply in {"530", "532"}
+            else "FTP_LIST_REJECTED"
+        )
+        return BackupError(code, **details)
+
     def listdir(self, relative):
+        operation = "CWD"
         try:
             self._cwd(relative)
+            operation = "MLSD"
             for name, facts in self.ftp.mlsd():
+                if any(re.search(r'[\ud800-\udfff]', key + value) for key, value in facts.items()):
+                    raise ValueError("INVALID_MLSD_FACTS")
                 kind = facts.get("type", "")
                 if kind in {"cdir", "pdir"}:
                     continue
@@ -126,11 +177,20 @@ class FtpsSource:
         except ssl.SSLCertVerificationError:
             self.close()
             raise BackupError("TLS_CERTIFICATE_INVALID") from None
-        except (ValueError, ftplib.error_perm):
-            raise BackupError("REMOTE_LIST_UNSUPPORTED") from None
-        except (OSError, EOFError, ftplib.Error):
+        except ftplib.error_perm as error:
+            raise self._listing_rejection(error, operation) from None
+        except UnicodeDecodeError:
             self.close()
-            raise BackupError("TRANSFER_INTERRUPTED") from None
+            raise BackupError("REMOTE_LIST_ENCODING_INVALID", operation=operation) from None
+        except ValueError:
+            raise BackupError("REMOTE_LIST_INVALID", operation=operation) from None
+        except (OSError, EOFError, ftplib.Error) as error:
+            self.close()
+            details = {"operation": operation}
+            reply = str(error)[:3] if isinstance(error, ftplib.Error) else ""
+            if reply.isascii() and reply.isdigit():
+                details["ftp_reply_code"] = int(reply)
+            raise BackupError("TRANSFER_INTERRUPTED", **details) from None
 
     def stat(self, relative):
         parent, name = posixpath.split(relative_path(relative))
@@ -265,8 +325,14 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
         parent, depth = queue.pop()
         if depth > 64:
             raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-        entries = source.listdir(parent) if hasattr(source, 'retry_file') else retry_call(
-            lambda: list(source.listdir(parent)), reconnect=getattr(source, 'reconnect', None), phase='SCANNING')
+        try:
+            entries = list(source.listdir(parent)) if hasattr(source, 'retry_file') else retry_call(
+                lambda: list(source.listdir(parent)), reconnect=getattr(source, 'reconnect', None), phase='SCANNING')
+        except BackupError as error:
+            if not parent or not continue_on_error or error.code != "REMOTE_DIRECTORY_UNAVAILABLE":
+                raise
+            errors.append({'path':parent, 'kind':'dir', 'error_code':error.code, **error.details})
+            continue
         for entry in entries:
             if time.monotonic() > deadline:
                 raise BackupError("TRANSFER_TIMEOUT")
@@ -280,7 +346,7 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
             if len(seen) > max_files:
                 raise BackupError("TRANSFER_LIMIT_EXCEEDED")
             if issue:
-                omission = {'path':relative, 'kind':entry.kind, 'reason':issue,
+                omission = {'path':display_remote_path(relative), 'kind':entry.kind, 'reason':issue,
                             'error_code':'REMOTE_NAME_UNSUPPORTED'}
                 skipped.append(omission)
                 errors.append(dict(omission))

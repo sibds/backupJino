@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -66,6 +67,8 @@ class DirectoryCheckpoint:
         self.db = self.lock = None
         self.notify = notify or (lambda event: None)
         self.last_notice = 0
+        self.mutex = threading.RLock()
+        self.on_commit = None
 
     def __enter__(self):
         if self.root.is_symlink():
@@ -88,7 +91,8 @@ class DirectoryCheckpoint:
         self.lock = FileLock(local_path(self.root, '.jino-progress/download.lock'))
         self.lock.__enter__()
         try:
-            self.db = sqlite3.connect(local_path(self.root, '.jino-progress/progress.sqlite3'))
+            self.db = sqlite3.connect(local_path(self.root, '.jino-progress/progress.sqlite3'),
+                                      check_same_thread=False)
             self.db.row_factory = sqlite3.Row
             self.db.execute('''CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified TEXT,
@@ -109,19 +113,26 @@ class DirectoryCheckpoint:
                 self.lock.__exit__()
 
     def record(self, relative, entry, state, size, digest):
-        with self.db:
-            self.db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?)',
-                            (relative, entry.size, entry.modified, state, size, digest))
-        if time.monotonic() - self.last_notice >= 10:
-            row = self.db.execute("SELECT COUNT(*) AS files, COALESCE(SUM(committed),0) AS bytes FROM files").fetchone()
-            self.notify({'event':'progress', 'files_seen':row['files'], 'bytes_saved':row['bytes']})
-            self.last_notice = time.monotonic()
+        event = None
+        with self.mutex:
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?)',
+                                (relative, entry.size, entry.modified, state, size, digest))
+            if time.monotonic() - self.last_notice >= 10:
+                row = self.db.execute("SELECT COUNT(*) AS files, COALESCE(SUM(committed),0) AS bytes FROM files").fetchone()
+                event = {'event':'progress', 'files_seen':row['files'], 'bytes_saved':row['bytes']}
+                self.last_notice = time.monotonic()
+        if self.on_commit:
+            self.on_commit(relative, state, size)
+        if event:
+            self.notify(event)
 
     def fetch(self, source, relative, entry, local, deadline):
         local = local_path(self.root, 'files/' + relative)
         private_dir(local.parent)
         partial = local_path(self.root, '.jino-progress/' + hashlib.sha256(relative.encode()).hexdigest() + '.part')
-        row = self.db.execute('SELECT * FROM files WHERE path=?', (relative,)).fetchone()
+        with self.mutex:
+            row = self.db.execute('SELECT * FROM files WHERE path=?', (relative,)).fetchone()
         unchanged = bool(row and row['size'] == entry.size and row['modified'] == entry.modified and entry.modified)
         if row and row['state'] == 'done':
             if not unchanged:
@@ -168,6 +179,11 @@ class DirectoryCheckpoint:
             raise BackupError('SOURCE_CHANGED')
         os.replace(partial, local)
         self.record(relative, entry, 'done', entry.size, digest.hexdigest())
+
+    def committed_offset(self, relative):
+        with self.mutex:
+            row = self.db.execute('SELECT committed FROM files WHERE path=?', (relative,)).fetchone()
+        return row[0] if row else 0
 
     def validate_inventory(self, items):
         expected = {item['path'] for item in items}

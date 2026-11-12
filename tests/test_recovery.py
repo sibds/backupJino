@@ -20,6 +20,34 @@ def test_five_reconnections_use_exponential_delays_and_then_succeed():
     assert [event["retry_attempt"] for event in events if event["stage"] == "RETRY_WAIT"] == [1, 2, 3, 4, 5]
 
 
+def test_committed_progress_resets_only_that_files_no_progress_retry_budget():
+    from jino_backup.retry import retry_call
+    committed, calls, delays, events = 0, 0, [], []
+    def operation():
+        nonlocal committed, calls
+        calls += 1
+        if calls <= 9:
+            committed += 100
+            raise BackupError("TRANSFER_INTERRUPTED", operation="RETR", curl_error_code=56)
+        return "complete"
+    assert retry_call(operation, progress=lambda: committed, wait=delays.append,
+                      notify=lambda **event: events.append(event)) == "complete"
+    assert calls == 10 and delays == [2] * 9
+    assert all(event["retry_attempt"] == 1 for event in events if event["stage"] == "RETRY_WAIT")
+    assert any(event.get("curl_error_code") == 56 for event in events)
+
+
+def test_retry_still_stops_after_five_reconnections_without_file_progress():
+    from jino_backup.retry import retry_call
+    calls, delays = [], []
+    def operation():
+        calls.append(1)
+        raise BackupError("TRANSFER_INTERRUPTED")
+    with pytest.raises(BackupError, match="TRANSFER_INTERRUPTED"):
+        retry_call(operation, progress=lambda: 1234, wait=delays.append)
+    assert len(calls) == 6 and delays == [2,4,8,16,32]
+
+
 @pytest.mark.parametrize("code", ["TLS_CERTIFICATE_INVALID", "FTP_LOGIN_DENIED", "AUTH_FAILED", "REMOTE_PATH_UNSAFE", "CANCELLED"])
 def test_permanent_errors_are_never_retried(code):
     from jino_backup.retry import retry_call

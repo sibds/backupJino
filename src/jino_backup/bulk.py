@@ -76,12 +76,13 @@ class DownloadBatch:
     def __init__(self, plan, destination, batch_id, remote_root, source_factory=source_for,
                  *, notify=None, max_bytes=1024**4, max_files=1000000,
                  timeout_seconds=86400, known_hosts=None, continue_on_error=False,
-                 skip_unsupported_names=False, retry_wait=None):
+                 skip_unsupported_names=False, retry_wait=None, collector=None):
         if not isinstance(batch_id, str) or not 1 <= len(batch_id) <= 160:
             raise BackupError('IDEMPOTENCY_KEY_INVALID')
         self.plan, self.destination = plan, Path(destination).absolute()
         self.skip_unsupported_names = skip_unsupported_names
         self.retry_wait = retry_wait
+        self.collector = collector
         self.batch_id, self.run_id = batch_id, identity('download', batch_id)
         self.remote_root, self.source_factory = safe_root(remote_root), source_factory
         self.max_bytes, self.max_files, self.timeout_seconds = max_bytes, max_files, timeout_seconds
@@ -126,15 +127,18 @@ class DownloadBatch:
                     raise BackupError('INTEGRITY_FAILED') from None
             started = datetime.now(timezone.utc).isoformat()
             site = {'remote_root':self.remote_root, 'known_hosts':self.known_hosts}
-            raw = retry_call(lambda: self.source_factory(server.credentials, site),
-                             wait=self.retry_wait, notify=lambda **values: event(values), phase='SCANNING')
-            recovering = raw if hasattr(raw, 'retry_file') else RecoveringSource(
-                raw, wait=self.retry_wait, notify=lambda **values: event(values))
-            with recovering as source:
-                captured = collect_files(source, snapshot / 'files', max_bytes=self.max_bytes,
-                                         max_files=self.max_files, timeout_seconds=self.timeout_seconds,
-                                         checkpoint=progress, continue_on_error=self.continue_on_error,
-                                         skip_unsupported_names=self.skip_unsupported_names)
+            if self.collector:
+                captured = self.collector.collect(server.credentials, site, snapshot, progress)
+            else:
+                raw = retry_call(lambda: self.source_factory(server.credentials, site),
+                                 wait=self.retry_wait, notify=lambda **values: event(values), phase='SCANNING')
+                recovering = raw if hasattr(raw, 'retry_file') else RecoveringSource(
+                    raw, wait=self.retry_wait, notify=lambda **values: event(values))
+                with recovering as source:
+                    captured = collect_files(source, snapshot / 'files', max_bytes=self.max_bytes,
+                                             max_files=self.max_files, timeout_seconds=self.timeout_seconds,
+                                             checkpoint=progress, continue_on_error=self.continue_on_error,
+                                             skip_unsupported_names=self.skip_unsupported_names)
             manifest = {'schema_version':'1.0', 'job_id':self.run_id, 'site_id':server.server_id,
                         'scope':scope, 'status':'PARTIAL' if captured.get('errors') else 'FILES_ONLY', 'capture_method':server.credentials['protocol'],
                         'capture_started_at':started, 'capture_finished_at':datetime.now(timezone.utc).isoformat(),

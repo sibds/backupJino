@@ -35,7 +35,7 @@ def test_ftps_distinguishes_login_failure_from_root_access(denied, code, monkeyp
         def close(self):
             pass
 
-    monkeypatch.setattr("jino_backup.transfer.ftplib.FTP_TLS", DeniedFTP)
+    monkeypatch.setattr("jino_backup.transfer.ListingFTP_TLS", DeniedFTP)
     with pytest.raises(BackupError, match=code):
         with FtpsSource(
             {"host": "ftp.example.test", "port": 21, "username": "test", "password": "synthetic"},
@@ -244,7 +244,7 @@ def test_expired_certificate_is_distinct_and_never_retried_as_a_network_outage(m
         def close(self):
             pass
 
-    monkeypatch.setattr("jino_backup.transfer.ftplib.FTP_TLS", ExpiredCertificate)
+    monkeypatch.setattr("jino_backup.transfer.ListingFTP_TLS", ExpiredCertificate)
     with pytest.raises(BackupError, match="TLS_CERTIFICATE_INVALID"):
         with FtpsSource(
             {"host": "ftp.example.test", "port": 21, "username": "test", "password": "secret"},
