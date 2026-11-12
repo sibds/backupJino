@@ -41,6 +41,12 @@ ERROR_LABELS = {
     "SFTP_CONNECTION_FAILED": "Не удалось подключиться по SFTP",
     "KNOWN_HOSTS_REQUIRED": "Для SFTP укажите файл проверенных ключей сервера",
     "REMOTE_LIST_UNSUPPORTED": "FTP-сервер не вернул поддерживаемый список файлов",
+    "REMOTE_LIST_INVALID": "FTP вернул некорректные сведения о файлах",
+    "REMOTE_LIST_ENCODING_INVALID": "FTP вернул имена, которые не удалось прочитать в UTF-8",
+    "REMOTE_DIRECTORY_UNAVAILABLE": "FTP не разрешил прочитать каталог или каталог недоступен",
+    "FTP_LIST_REJECTED": "FTP отклонил запрос списка; код ответа указан в журнале",
+    "CONNECTION_LIMIT_INVALID": "Выберите от 2 до 5 FTPS-сеансов на сервер",
+    "FTP_ROOT_UNVERIFIED": "FTPS-сеанс не подтвердил разрешённый корень",
     "REMOTE_PATH_UNSAFE": "Обнаружен путь за разрешённым корнем или недопустимое имя",
     "REMOTE_NAME_UNSUPPORTED": "Пропущено имя, несовместимое с Windows",
     "REMOTE_TYPE_UNSAFE": "Обнаружен неподдерживаемый тип удалённого объекта",
@@ -575,6 +581,7 @@ class DashboardData:
                     "revision",
                     "ftp_ready",
                     "skip_unsupported_names",
+                    "ftp_connections",
                 )
             }
             server["configuration"]["panel_credentials_saved"] = account.get(
@@ -761,6 +768,8 @@ class DashboardData:
         }
         return {
             "generated_at": utc_now(),
+            "ftp_connections": self.management.runner.budget.snapshot()
+            if self.management and hasattr(self.management.runner, "budget") else {"used": 0, "limit": 10},
             "report_updated_at": datetime.fromtimestamp(
                 self.report_path.stat().st_mtime, timezone.utc
             ).isoformat()
@@ -813,7 +822,11 @@ class DashboardData:
         skipped_events = self.management.events(row, limit=500, stage="FILE_SKIPPED") if self.management else []
         for event in skipped_events:
             event["message"] = ERROR_LABELS.get(event.get("error_code"))
-        return {"server": server, "events": events[:500], "skipped_events": skipped_events}
+        directory_events = self.management.events(row, limit=500, stage="DIRECTORY_ERROR") if self.management else []
+        for event in directory_events:
+            event["message"] = ERROR_LABELS.get(event.get("error_code"))
+        return {"server": server, "events": events[:500], "skipped_events": skipped_events,
+                "directory_events": directory_events}
 
     def work_plan(self):
         plan = self.enable_management().plan()

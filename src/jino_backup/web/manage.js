@@ -17,6 +17,8 @@
     QUEUE_UPDATED: "Изменён план работ",
     FILE_DOWNLOAD: "Передача файла",
     FILE_ERROR: "Ошибка передачи файла",
+    DIRECTORY_ERROR: "Не удалось прочитать каталог",
+    SCANNING: "Чтение списка каталога",
     FILE_SKIPPED: "Пропущено несовместимое имя",
     RETRY_WAIT: "Ожидание повторного подключения",
     RECONNECT: "Восстановление соединения",
@@ -308,7 +310,8 @@
         : "FTP-доступ требует настройки"
     );
     const diagnostics = document.createDocumentFragment();
-    for (const item of server.diagnostics || []) {
+    const diagnosticItems = displayDiagnostics(server);
+    for (const item of diagnosticItems) {
       const row = node("div", "diagnostic");
       row.append(
         node("strong", "", item.source),
@@ -317,7 +320,7 @@
       );
       diagnostics.append(row);
     }
-    if (!server.diagnostics?.length)
+    if (!diagnosticItems.length)
       diagnostics.append(
         node("p", "secondary-text", "Зафиксированных ошибок нет")
       );
@@ -376,6 +379,15 @@
     $("skip-unsupported-names").disabled =
       pending ||
       server.blocked ||
+      (server.tasks || []).some((task) => activeStates.includes(task.state));
+    if (!pending)
+      $("ftp-connections").value = String(
+        server.configuration?.ftp_connections || 3
+      );
+    $("ftp-connections").disabled =
+      pending ||
+      server.blocked ||
+      $("file-transport").value !== "ftps" ||
       (server.tasks || []).some((task) => activeStates.includes(task.state));
     for (const kind of ["files", "databases"]) {
       const task = server.latest_tasks?.[kind];
@@ -547,6 +559,30 @@
                 count(progress.verified_files)
             )
           );
+          if (task.transport === "ftps")
+            fragment.append(
+              node(
+                "p",
+                "helper",
+                "Передач сейчас: " +
+                  count(progress.active_transfers) +
+                  " · Предел сеансов сервера: " +
+                  count(progress.connections_limit || task.ftp_connections || 3)
+              )
+            );
+          if (
+            progress.parallel_limit &&
+            progress.parallel_limit < (progress.connections_limit || 3) - 1
+          )
+            fragment.append(
+              node(
+                "p",
+                "helper",
+                "После обрывов новые передачи ограничены до " +
+                  count(progress.parallel_limit) +
+                  " одновременно. Текущие передачи завершаются."
+              )
+            );
         } else {
           const bar = node("progress", "job-progress");
           bar.max = Math.max(1, progress.expected_count || 1);
@@ -574,7 +610,20 @@
             )
           );
         }
-        if (progress.current_file) {
+        if (kind === "files" && progress.active_files?.length) {
+          for (const file of progress.active_files)
+            fragment.append(
+              node(
+                "p",
+                "current-job-file",
+                file.path +
+                  " · " +
+                  bytes(file.received_bytes) +
+                  " из " +
+                  bytes(file.size_bytes)
+              )
+            );
+        } else if (progress.current_file) {
           fragment.append(
             node(
               "p",
@@ -671,6 +720,8 @@
     const selectedEvents =
       $("server-log-filter").value === "skipped"
         ? detail?.skipped_events
+        : $("server-log-filter").value === "directories"
+        ? detail?.directory_events
         : detail?.events;
     for (const event of selectedEvents || []) {
       const row = node("div", "server-log-row");
@@ -693,6 +744,41 @@
       );
       if (event.error_code) row.append(node("code", "", event.error_code));
       if (event.file) row.append(node("span", "event-file", event.file));
+      if (event.directory)
+        row.append(node("span", "event-file", "Каталог: " + event.directory));
+      if (event.operation)
+        row.append(
+          node(
+            "span",
+            "secondary-text",
+            "Операция: " +
+              event.operation +
+              (event.ftp_reply_code
+                ? " · Ответ FTP: " + event.ftp_reply_code
+                : "")
+          )
+        );
+      if (event.stage === "RETRY_WAIT")
+        if (event.committed_bytes !== undefined)
+          row.append(node("span", "secondary-text",
+            "Сохранено в этом файле: " + bytes(event.committed_bytes) +
+            (event.progress_advanced ? ". Есть продвижение; счётчик повторов сброшен." : ". Новые данные не сохранены.")));
+      if (event.curl_error_code) {
+        const reasons = {
+          LOW_SPEED_TIMEOUT: "Нет данных дольше допустимого времени",
+          OPERATION_TIMEOUT: "Истекло время сетевой операции",
+          CONNECTION_RESET: "Соединение сброшено",
+          RECEIVE_ERROR: "Ошибка получения данных",
+          SEND_ERROR: "Ошибка отправки данных",
+          TRUNCATED_TRANSFER: "Передача завершилась раньше ожидаемого размера",
+          DNS_ERROR: "Ошибка определения адреса сервера",
+          CONNECT_ERROR: "Не удалось установить соединение",
+          TLS_ERROR: "Ошибка защищённого соединения",
+          OTHER: "Ошибка передачи",
+        };
+        row.append(node("span", "secondary-text", "libcurl: " + event.curl_error_code +
+          " · " + (reasons[event.curl_error_kind] || reasons.OTHER)));
+      }
       if (event.stage === "RETRY_WAIT")
         row.append(
           node(
@@ -720,6 +806,7 @@
           WINDOWS_CHARACTERS: "Символы, недопустимые в Windows",
           TRAILING_DOT_OR_SPACE: "Точка или пробел в конце имени",
           WINDOWS_RESERVED_NAME: "Зарезервированное имя Windows",
+          INVALID_UTF8_NAME: "Недопустимые байты UTF-8; имя показано escape-последовательностями",
         };
         row.append(
           node(
@@ -749,6 +836,8 @@
           "secondary-text",
           $("server-log-filter").value === "skipped"
             ? "Пропусков имён пока нет"
+            : $("server-log-filter").value === "directories"
+            ? "Ошибок чтения каталогов пока нет"
             : "Событий этого сервера пока нет"
         )
       );
@@ -877,6 +966,14 @@
       revision: detail.server.configuration.revision,
     });
   });
+  $("ftp-connections").addEventListener("change", () => {
+    if (!detail?.server) return;
+    command("/api/servers/" + selected, {
+      ftp_connections: Number($("ftp-connections").value),
+      revision: detail.server.configuration.revision,
+    });
+  });
+  $("file-transport").addEventListener("change", renderJobs);
   $("card-copy-folder").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(detail.server.folder_path);

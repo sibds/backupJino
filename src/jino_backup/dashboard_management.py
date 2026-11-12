@@ -28,20 +28,49 @@ class TaskControl:
         self.paused = False
         self.stopped = False
         self.changed = changed
+        self.workers = set()
+        self.waiting_workers = set()
+        self.pause_announced = False
 
-    def checkpoint(self):
+    def register_worker(self):
+        with self.condition:
+            self.workers.add(threading.get_ident())
+
+    def finish_worker(self):
+        with self.condition:
+            self.workers.discard(threading.get_ident())
+            self.waiting_workers.discard(threading.get_ident())
+            announce = self.paused and bool(self.workers) and self.workers <= self.waiting_workers and not self.pause_announced
+            if announce:
+                self.pause_announced = True
+        if announce:
+            self.changed("PAUSED")
+
+    def checkpoint(self, *, interrupted=None):
         with self.condition:
             waiting = self.paused and not self.stopped
         if waiting:
-            self.changed("PAUSED")
+            with self.condition:
+                self.waiting_workers.add(threading.get_ident())
+                announce = (not self.workers or self.workers <= self.waiting_workers) and not self.pause_announced
+                if announce:
+                    self.pause_announced = True
+            if announce:
+                self.changed("PAUSED")
             with self.condition:
                 while self.paused and not self.stopped:
-                    self.condition.wait()
+                    if interrupted and interrupted():
+                        self.waiting_workers.discard(threading.get_ident())
+                        raise BackupError("CANCELLED")
+                    self.condition.wait(0.25)
                 resumed = not self.stopped
-            if resumed:
+                self.waiting_workers.discard(threading.get_ident())
+                announce = resumed and self.pause_announced
+                self.pause_announced = False
+            if announce:
                 self.changed("RUNNING")
         with self.condition:
-            if self.stopped:
+            if self.stopped or interrupted and interrupted():
                 raise BackupError("CANCELLED")
 
     def request(self, action):
@@ -52,10 +81,10 @@ class TaskControl:
                 self.paused = action == "pause"
             self.condition.notify_all()
 
-    def wait(self, seconds):
+    def wait(self, seconds, *, interrupted=None):
         deadline = time.monotonic() + seconds
         while True:
-            self.checkpoint()
+            self.checkpoint(interrupted=interrupted)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
@@ -153,6 +182,7 @@ class DashboardManagement:
             "expected_count",
             "skipped_count",
             "retry_attempt", "retry_limit", "retry_delay_seconds",
+            "retry_total", "committed_bytes",
         ):
             if type(details.get(key)) is int:
                 event[key] = details[key]
@@ -160,10 +190,23 @@ class DashboardManagement:
             event["file"] = details["current_file"][:300]
         if isinstance(details.get("retry_at"), str):
             event["retry_at"] = details["retry_at"]
+        if isinstance(details.get("directory"), str):
+            event["directory"] = details["directory"][:2000]
+        if details.get("operation") in {"CWD", "PWD", "MLSD", "RETR"}:
+            event["operation"] = details["operation"]
+        if type(details.get("ftp_reply_code")) is int and 100 <= details["ftp_reply_code"] <= 599:
+            event["ftp_reply_code"] = details["ftp_reply_code"]
+        from .errors import CURL_ERROR_KINDS
+        if type(details.get("curl_error_code")) is int and 0 < details["curl_error_code"] < 1000:
+            event["curl_error_code"] = details["curl_error_code"]
+        if details.get("curl_error_kind") in CURL_ERROR_KINDS:
+            event["curl_error_kind"] = details["curl_error_kind"]
+        if type(details.get("progress_advanced")) is bool:
+            event["progress_advanced"] = details["progress_advanced"]
         if stage == "FILE_SKIPPED":
             if isinstance(details.get("skipped_path"), str):
                 event["file"] = details["skipped_path"][:2000]
-            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME"}:
+            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME", "INVALID_UTF8_NAME"}:
                 event["skip_reason"] = details["skip_reason"]
             if details.get("skipped_kind") in {"file", "dir"}:
                 event["skipped_kind"] = details["skipped_kind"]
@@ -303,6 +346,7 @@ class DashboardManagement:
                 "result": None,
                 "snapshot_date": snapshot,
                 "skip_unsupported_names": kind == "files" and server["skip_unsupported_names"],
+                "ftp_connections": server["ftp_connections"],
                 "scheduled_at": scheduled_at,
                 "priority": priority,
                 "position": max((item.get("position", 0) for item in self.tasks()), default=0) + 1,
@@ -344,7 +388,12 @@ class DashboardManagement:
                     control = TaskControl(lambda state: self._control_state(task_id, state))
                     self.controls[task_id] = control
                     if task["kind"] == "files":
-                        self._update(task_id, skip_unsupported_names=server["skip_unsupported_names"])
+                        self._update(task_id, skip_unsupported_names=server["skip_unsupported_names"],
+                                     ftp_connections=server["ftp_connections"])
+                    progress = dict(task["progress"])
+                    progress.update(retry_attempt=0, retry_delay_seconds=0, retry_at=None,
+                                    active_files=[], active_transfers=0)
+                    self._update(task_id, stage="WAITING", progress=progress)
                 self._update(task_id, state="RUNNING" if active else "QUEUED", error_code=None, result=None)
             elif task["state"] not in ACTIVE:
                 return task
@@ -614,6 +663,8 @@ class DashboardManagement:
                 "current_size",
                 "skipped_count",
                 "retry_attempt", "retry_limit", "retry_delay_seconds",
+                "retry_total", "committed_bytes",
+                "connections_limit", "active_transfers", "parallel_limit",
             ):
                 if type(values.get(key)) is int and values[key] >= 0:
                     progress[key] = values[key]
@@ -621,6 +672,15 @@ class DashboardManagement:
                 progress["current_file"] = values["current_file"][:300]
             if type(values.get("inventory_complete")) is bool:
                 progress["inventory_complete"] = values["inventory_complete"]
+            if isinstance(values.get("active_files"), list):
+                progress["active_files"] = [
+                    {"path": item["path"][:2000], "size_bytes": item["size_bytes"],
+                     "received_bytes": item["received_bytes"]}
+                    for item in values["active_files"][:5]
+                    if isinstance(item, dict) and isinstance(item.get("path"), str)
+                    and type(item.get("size_bytes")) is int and type(item.get("received_bytes")) is int
+                    and 0 <= item["received_bytes"] <= item["size_bytes"]
+                ]
             if "retry_at" in values and (values["retry_at"] is None or isinstance(values["retry_at"], str)):
                 progress["retry_at"] = values["retry_at"]
             stage = values.get("stage", task["stage"])
@@ -642,6 +702,8 @@ class DashboardManagement:
                     task_id=task_id,
                     **progress,
                     **{key: values[key] for key in ("skipped_path", "skip_reason", "skipped_kind") if key in values},
+                    **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
+                       "curl_error_code", "curl_error_kind", "progress_advanced") if key in values},
                 )
 
     def close(self):

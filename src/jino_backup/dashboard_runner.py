@@ -15,8 +15,10 @@ from .panel import JinoPanelBrowser
 from .panel_downloads import PanelFileJob, PanelFileSource
 from .panel_export import PanelExportJob
 from .state import Settings
-from .transfer import relative_path, name_compatibility_issue, source_for
+from .transfer import relative_path, name_compatibility_issue, source_for, display_remote_path
 from .retry import RecoveringSource
+from .parallel import ParallelCollector, ConnectionBudget
+from .curl_transfer import CurlFileSource
 
 
 class ControlledWriter:
@@ -34,12 +36,15 @@ class ControlledWriter:
 
 
 class ControlledSource:
-    def __init__(self, source, control, progress, output, *, skip_unsupported_names=False):
+    def __init__(self, source, control, progress, output, *, skip_unsupported_names=False,
+                 continue_on_error=False):
         self.source, self.control, self.progress, self.output = source, control, progress, output
         self.inventory = {}
         self.received_bytes = 0
         self.last_notice = 0
         self.skip_unsupported_names = skip_unsupported_names
+        self.continue_on_error = continue_on_error
+        self.inventory_errors = {}
 
     def __getattr__(self, name):
         return getattr(self.source, name)
@@ -72,7 +77,16 @@ class ControlledSource:
                     raise BackupError("TRANSFER_LIMIT_EXCEEDED")
                 if time.monotonic() > deadline:
                     raise BackupError("TRANSFER_TIMEOUT")
-                entries = list(self.source.listdir(parent))
+                self.progress(stage="SCANNING", log=True, directory=parent or "/")
+                try:
+                    entries = list(self.source.listdir(parent))
+                except BackupError as error:
+                    self.progress(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
+                                  error_code=error.code, **error.details)
+                    if not parent or not self.continue_on_error or error.code != "REMOTE_DIRECTORY_UNAVAILABLE":
+                        raise
+                    self.inventory_errors[parent] = error
+                    continue
                 self.inventory[parent] = entries
                 for entry in entries:
                     issue = name_compatibility_issue(entry.name)
@@ -82,7 +96,7 @@ class ControlledSource:
                             raise BackupError("REMOTE_PATH_UNSAFE")
                         skipped_count += 1
                         self.progress(stage="FILE_SKIPPED", log=True, error_code="REMOTE_NAME_UNSUPPORTED",
-                                      skipped_count=skipped_count, skipped_path=path,
+                                      skipped_count=skipped_count, skipped_path=display_remote_path(path),
                                       skip_reason=issue, skipped_kind=entry.kind)
                         continue
                     relative_path(path)
@@ -104,7 +118,7 @@ class ControlledSource:
                 planned_bytes=planned_bytes,
                 planned_files=planned_files,
                 directories_seen=len(self.inventory),
-                inventory_complete=True,
+                inventory_complete=not bool(self.inventory_errors),
                 log=True,
             )
             return self
@@ -117,6 +131,8 @@ class ControlledSource:
 
     def listdir(self, relative):
         self.control.checkpoint()
+        if relative in self.inventory_errors:
+            raise self.inventory_errors[relative]
         return self.inventory[relative]
 
     def stat(self, relative):
@@ -156,6 +172,8 @@ class ControlledSource:
 class OperatorRunner:
     def __init__(self, data, catalog):
         self.data, self.catalog = data, catalog
+        self.budget = ConnectionBudget(10)
+        self.download_factory = CurlFileSource
 
     def __call__(self, server, task, control, progress):
         skip_names = task.get("skip_unsupported_names", server.get("skip_unsupported_names", False))
@@ -180,7 +198,7 @@ class OperatorRunner:
 
                 def factory(values, site):
                     return ControlledSource(RecoveringSource(source_for(values, site), wait=control.wait, notify=progress), control, progress, output,
-                                            skip_unsupported_names=skip_names)
+                                            skip_unsupported_names=skip_names, continue_on_error=True)
 
                 batch = DownloadBatch(
                     plan,
@@ -189,10 +207,18 @@ class OperatorRunner:
                     server["remote_root"],
                     source_factory=factory,
                     known_hosts=server.get("known_hosts") or None,
-                    notify=lambda event: progress(received_bytes=event.get("bytes_saved")),
+                    notify=lambda event: progress(received_bytes=event.get("bytes_saved"))
+                    if task["transport"] != "ftps" else None,
                     continue_on_error=True,
                     skip_unsupported_names=skip_names,
                     retry_wait=control.wait,
+                    collector=ParallelCollector(
+                        control, progress, self.budget,
+                        connections=task.get("ftp_connections", server.get("ftp_connections", 3)),
+                        metadata_factory=lambda values, site: source_for(values, site),
+                        download_factory=self.download_factory,
+                        skip_unsupported_names=skip_names,
+                    ) if task["transport"] == "ftps" else None,
                 )
                 result = batch.run()["servers"][0]
                 self._file_totals(output, progress)
@@ -226,7 +252,7 @@ class OperatorRunner:
                     scope = panel.inspect_files()
                     return ControlledSource(
                         RecoveringSource(PanelFileSource(panel, scope, skip_unsupported_names=skip_names), wait=control.wait, notify=progress), control, progress, output,
-                        skip_unsupported_names=skip_names,
+                        skip_unsupported_names=skip_names, continue_on_error=True,
                     )
 
                 result = PanelFileJob(

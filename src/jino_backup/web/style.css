@@ -363,6 +363,9 @@
 .danger-text {
   color: var(--danger);
 }
+.row-diagnostic.historical {
+  color: var(--secondary);
+}
 .card-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1070,6 +1073,9 @@ th.controls-column {
   font-size: 12px;
   color: var(--secondary);
 }
+.server-list .row-progress-label {
+  display: none;
+}
 @media (max-width: 600px) {
   .row-job .row-continue {
     min-height: 44px;
@@ -1089,9 +1095,17 @@ th.controls-column {
   .server-list tbody td {
     border-bottom: 0;
   }
-  .server-list .stage-column,
-  .server-list .bytes-column {
+  .server-list .stage-column {
     display: none;
+  }
+  .server-list .bytes-column {
+    display: block;
+    grid-column: 1 / -1;
+    padding-top: 0;
+  }
+  .server-list .row-progress-label {
+    display: block;
+    margin-bottom: 5px;
   }
   .server-list .row-controls {
     grid-column: 1 / -1;

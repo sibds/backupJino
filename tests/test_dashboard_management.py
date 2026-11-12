@@ -82,6 +82,42 @@ def test_catalog_crud_keeps_secrets_encrypted_and_original_source_unchanged(mana
     assert management.data.source.read_bytes() == before
 
 
+def test_ftp_connection_policy_is_saved_without_changing_the_backup_binding(management):
+    config = management.catalog.get(1)
+    assert config["ftp_connections"] == 3
+    changed = management.save_server(1, {"ftp_connections": 5})
+    assert changed["ftp_connections"] == 5
+    assert changed["binding_revision"] == config["binding_revision"]
+    for value in (1, 6, True, "4"):
+        with pytest.raises(BackupError, match="CONNECTION_LIMIT_INVALID"):
+            management.save_server(1, {"ftp_connections": value})
+
+
+def test_directory_failure_log_keeps_path_operation_and_safe_reply(management):
+    management.event(1, "DIRECTORY_ERROR", kind="files", code="REMOTE_DIRECTORY_UNAVAILABLE",
+                     directory="restricted/cache", operation="MLSD", ftp_reply_code=550,
+                     upstream_text="NEVER-EXPOSE")
+    event = management.events(1)[0]
+    assert event["directory"] == "restricted/cache"
+    assert event["operation"] == "MLSD" and event["ftp_reply_code"] == 550
+    assert "NEVER-EXPOSE" not in json.dumps(event)
+    management.event(1, "DIRECTORY_ERROR", operation="NEVER-EXPOSE", ftp_reply_code=900)
+    event = management.events(1)[0]
+    assert "operation" not in event and "ftp_reply_code" not in event
+
+
+def test_directory_failure_filter_survives_later_inventory_events(management):
+    management.data.management = management
+    management.event(1, "DIRECTORY_ERROR", code="REMOTE_DIRECTORY_UNAVAILABLE",
+                     directory="restricted", operation="MLSD", ftp_reply_code=550)
+    for index in range(510):
+        management.event(1, "SCANNING", directory="other-" + str(index))
+    detail = management.data.server_detail(1)
+    assert not any(event["stage"] == "DIRECTORY_ERROR" for event in detail["events"])
+    assert len(detail["directory_events"]) == 1
+    assert detail["directory_events"][0]["ftp_reply_code"] == 550
+
+
 def test_task_lifecycle_pauses_resumes_and_stops_without_deleting_copies(management):
     entered = threading.Event()
 
@@ -180,6 +216,7 @@ def test_operator_skips_unsupported_names_and_logs_each_private_path(management,
     from test_name_skipping import MemorySource
     source = MemorySource()
     monkeypatch.setattr("jino_backup.dashboard_runner.source_for", lambda *args: source)
+    management.runner.download_factory = lambda *args: MemorySource()
     task = management.start(1, "files", {"transport": "ftps"})
     wait_status(management, task["id"], "FINISHED")
     task = management.task(task["id"])
@@ -211,31 +248,33 @@ def test_failed_transfer_exposes_retry_history_partial_bytes_and_manual_resume(m
     broken, offsets, delays = True, [], []
     def transfer(relative, outgoing, offset):
         offsets.append(offset)
-        outgoing.write(b"first-file"[offset:offset+1] if broken else b"first-file"[offset:])
+        outgoing.write((b"first-file"[offset:offset+1] if offset < 3 else b"") if broken else b"first-file"[offset:])
         if broken:
             raise BackupError("TRANSFER_INTERRUPTED")
     source.download = transfer
     monkeypatch.setattr("jino_backup.dashboard_runner.source_for", lambda *args: source)
-    monkeypatch.setattr(TaskControl, "wait", lambda self, delay: delays.append(delay))
+    management.runner.download_factory = lambda *args: source
+    monkeypatch.setattr(TaskControl, "wait", lambda self, delay, **kwargs: delays.append(delay))
     task = management.start(1, "files", {"transport": "ftps"})
     wait_status(management, task["id"], "FAILED")
     failed = management.task(task["id"])
-    assert failed["progress"]["received_bytes"] == 6
+    assert failed["progress"]["received_bytes"] == 3
     assert failed["stage"] == "RETRY_EXHAUSTED"
     events = [item for item in management.events(1) if item["stage"] == "RETRY_WAIT"]
-    assert len(events) == 5 and sorted(item["retry_attempt"] for item in events) == [1,2,3,4,5]
-    assert delays == [2,4,8,16,32]
+    assert len(events) == 7 and sorted(item["retry_attempt"] for item in events) == [1,1,1,2,3,4,5]
+    assert delays == [2,2,2,4,8,16,32]
     broken = False
     continued = management.start(1, "files", {"transport": "ftps"})
     assert continued["id"] == task["id"] and continued.get("result") is None
     wait_status(management, task["id"], "FINISHED")
-    assert offsets[-1] == 6
+    assert offsets[-1] == 3
     assert management.task(task["id"])["result"]["status"] == "FILES_ONLY"
 
 
 def test_skip_name_setting_persists_and_applies_to_retry(management, monkeypatch):
     from test_name_skipping import MemorySource
     monkeypatch.setattr("jino_backup.dashboard_runner.source_for", lambda *args: MemorySource())
+    management.runner.download_factory = lambda *args: MemorySource()
     config = management.save_server(1, {"skip_unsupported_names": False})
     binding = config["binding_revision"]
     task = management.start(1, "files", {"transport": "ftps"})
@@ -248,6 +287,33 @@ def test_skip_name_setting_persists_and_applies_to_retry(management, monkeypatch
     assert management.task(task["id"])["result"]["status"] == "PARTIAL"
     with pytest.raises(BackupError, match="SERVER_CONFIG_INVALID"):
         management.save_server(1, {"skip_unsupported_names": "true"})
+
+
+def test_queued_resume_clears_stale_failure_stage_but_keeps_saved_bytes(management, monkeypatch):
+    monkeypatch.setattr(management, "_schedule", lambda: None)
+    task = management.start(1, "files", {"transport": "ftps"})
+    management._update(task["id"], state="FAILED", stage="RETRY_EXHAUSTED",
+        progress={"received_bytes": 1234, "retry_attempt": 5, "retry_delay_seconds": 32,
+                  "active_transfers": 1, "active_files": [{"path": "file.bin"}]})
+    resumed = management.action(task["id"], "resume")
+    assert resumed["id"] == task["id"] and resumed["state"] == "QUEUED"
+    assert resumed["stage"] == "WAITING"
+    assert resumed["progress"]["received_bytes"] == 1234
+    assert resumed["progress"]["retry_attempt"] == 0
+    assert resumed["progress"]["active_files"] == []
+
+
+def test_transfer_diagnostics_are_logged_without_arbitrary_details(management):
+    task = management.start(1, "files", {"transport": "ftps", "scheduled_at": "2099-01-01T00:00:00Z"})
+    management.progress(task["id"], {"stage": "RETRY_WAIT", "log": True,
+        "curl_error_code": 56, "curl_error_kind": "CONNECTION_RESET", "operation": "RETR",
+        "current_file": "file.bin", "committed_bytes": 1234, "progress_advanced": True,
+        "raw_error": "NEVER-EXPOSE"})
+    event = next(item for item in management.events(1) if item["stage"] == "RETRY_WAIT")
+    assert event["curl_error_code"] == 56 and event["curl_error_kind"] == "CONNECTION_RESET"
+    assert event["file"] == "file.bin" and event["committed_bytes"] == 1234
+    assert event["progress_advanced"] is True
+    assert "NEVER-EXPOSE" not in json.dumps(event)
 
 
 def test_partial_file_result_can_continue_with_the_same_task_key(management):

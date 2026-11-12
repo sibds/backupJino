@@ -139,12 +139,140 @@ function current(server) {
 function saved(server) {
   return server.progress.received_bytes + server.databases.received_bytes;
 }
+function serverWorkProgress(server) {
+  const tasks = { ...(server.latest_tasks || {}) };
+  if (!tasks.files && !tasks.databases) {
+    const files = server.progress || {};
+    const db = server.databases || {};
+    if (
+      files.metadata_available ||
+      files.received_bytes > 0 ||
+      files.current_file
+    )
+      tasks.files = {
+        state: server.status,
+        progress: files,
+        result: {
+          status: ["FILES_ONLY", "COMPLETE"].includes(server.status)
+            ? "FILES_ONLY"
+            : null,
+        },
+      };
+    if (db.verified_count > 0 || db.expected_count > 0 || db.current_file)
+      tasks.databases = {
+        state: db.state === "DB_ONLY" ? "FINISHED" : server.status,
+        progress: db,
+        result: { status: db.state },
+      };
+  }
+  const parts = [];
+  for (const kind of ["files", "databases"]) {
+    const task = tasks[kind];
+    if (!task) continue;
+    const progress = task.progress || {};
+    const label =
+      kind === "databases"
+        ? "БД"
+        : task.transport === "https_panel"
+        ? "HTTPS"
+        : task.transport === "sftp"
+        ? "SFTP"
+        : "FTP";
+    const successful =
+      (task.state === "FINISHED" ||
+        ["FILES_ONLY", "COMPLETE"].includes(task.state)) &&
+      (kind === "files"
+        ? ["FILES_ONLY", "COMPLETE"].includes(task.result?.status)
+        : ["DB_ONLY", "COMPLETE"].includes(task.result?.status));
+    let fraction = null;
+    let detail = statuses[task.state]?.[0] || "Подготовка";
+    if (successful) {
+      fraction = 1;
+      detail = "готово";
+    } else if (task.result?.status === "PARTIAL") {
+      detail = "частично";
+    } else if (
+      [
+        "QUEUED",
+        "SCHEDULED",
+        "WAITING_RATE_LIMIT",
+        "WAITING_OPERATOR",
+      ].includes(task.state) &&
+      !(kind === "files"
+        ? progress.received_bytes > 0
+        : progress.verified_count > 0)
+    ) {
+      fraction = 0;
+    } else if (kind === "files") {
+      if (progress.inventory_complete && progress.planned_bytes > 0) {
+        fraction = Math.max(
+          0,
+          Math.min(
+            0.99,
+            (progress.received_bytes || 0) / progress.planned_bytes
+          )
+        );
+        detail = percent(fraction * 100);
+      } else {
+        detail = "объём уточняется";
+      }
+    } else if (progress.expected_count > 0) {
+      fraction = Math.max(
+        0,
+        Math.min(0.99, (progress.verified_count || 0) / progress.expected_count)
+      );
+      detail =
+        count(progress.verified_count) + "/" + count(progress.expected_count);
+    }
+    parts.push({
+      fraction,
+      caption: label + ": " + detail,
+      active: ["RUNNING", "PAUSING", "STOPPING"].includes(task.state),
+      partial: task.result?.status === "PARTIAL",
+    });
+  }
+  return {
+    percent:
+      parts.length && parts.every((part) => part.fraction !== null)
+        ? (parts.reduce((total, part) => total + part.fraction, 0) * 100) /
+          parts.length
+        : null,
+    parts: parts.map((part) => part.caption),
+    active: parts.some((part) => part.active),
+    partial: parts.some((part) => part.partial),
+  };
+}
 function toast(message) {
   text("toast", message);
   $("toast").hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => ($("toast").hidden = true), 5000);
   text("announcement", message);
+}
+function displayDiagnostics(server, { table = false } = {}) {
+  const task = server.latest_tasks?.files;
+  const newerFtpsResult =
+    task?.transport === "ftps" &&
+    (task.error_code ||
+      task.progress?.directories_seen > 0 ||
+      task.progress?.verified_files > 0 ||
+      task.progress?.inventory_complete);
+  return (server.diagnostics || [])
+    .filter((item) => !(table && item.source === "FTP" && newerFtpsResult))
+    .map((item) =>
+      item.source === "FTP"
+        ? {
+            ...item,
+            historical: true,
+            source: table ? "FTP ранее" : "Прежняя проверка FTP",
+            message: table
+              ? item.message
+              : item.message +
+                ". Текущее подключение этим результатом не проверено",
+          }
+        : item
+    )
+    .sort((a, b) => Number(!!a.historical) - Number(!!b.historical));
 }
 function visibleServers() {
   if (!state.data) return [];
@@ -174,7 +302,7 @@ function visibleServers() {
     };
     if (
       state.reason &&
-      !(server.diagnostics || []).some((item) =>
+      !displayDiagnostics(server, { table: true }).some((item) =>
         (reasons[state.reason] || [state.reason]).includes(item.code)
       )
     )
@@ -459,11 +587,14 @@ function renderTable() {
         stages[server.stage] || statuses[server.status]?.[0] || "Ожидает"
       )
     );
-    for (const diagnostic of (server.diagnostics || []).slice(0, 2)) {
+    for (const diagnostic of displayDiagnostics(server, { table: true }).slice(
+      0,
+      2
+    )) {
       nameCell.append(
         element(
           "span",
-          "row-diagnostic",
+          "row-diagnostic" + (diagnostic.historical ? " historical" : ""),
           diagnostic.source + " · " + diagnostic.message
         )
       );
@@ -501,21 +632,36 @@ function renderTable() {
     tr.append(stageCell);
     const sizeCell = element("td", "bytes-column");
     sizeCell.append(
+      element("span", "availability-sub row-progress-label", "Прогресс сервера")
+    );
+    sizeCell.append(
       element(
         "span",
         "row-bytes",
         saved(server) > 0 ? bytes(saved(server)) : "—"
       )
     );
-    const file = current(server);
-    if (file && file.percent !== null) {
+    const work = serverWorkProgress(server);
+    if (work.parts.length) {
       const p = element("progress", "row-progress");
       p.max = 100;
-      p.value = file.percent;
-      p.setAttribute("aria-label", "Текущий файл: " + percent(file.percent));
+      if (work.percent !== null) p.value = work.percent;
+      p.setAttribute("aria-label", "Общий прогресс заданий сервера");
+      const caption =
+        work.percent !== null
+          ? percent(work.percent)
+          : work.active
+          ? "Прогресс уточняется"
+          : work.partial
+          ? "Частичный результат"
+          : "Общий объём неизвестен";
+      p.setAttribute("aria-valuetext", caption + "; " + work.parts.join("; "));
+      p.title =
+        "Последние задания файлов и БД учитываются как равные части работы. Процент отдельного файла не используется.";
+      if (work.percent !== null || work.active) sizeCell.append(p);
       sizeCell.append(
-        p,
-        element("div", "row-percent", percent(file.percent) + " файла")
+        element("div", "row-percent", caption),
+        element("span", "availability-sub", work.parts.join(" · "))
       );
     }
     tr.append(sizeCell);
@@ -705,6 +851,15 @@ function render() {
       : "Сохранённый прогресс на месте. Просмотр панели не запускает выгрузку."
   );
   text("total-bytes", bytes(summary.received_bytes));
+  text(
+    "ftp-budget",
+    state.data.ftp_connections
+      ? "FTPS: занято слотов " +
+          state.data.ftp_connections.used +
+          " из " +
+          state.data.ftp_connections.limit
+      : "FTPS: общий предел 10 сеансов"
+  );
   text("total-files", count(summary.verified_files));
   text("total-databases", count(summary.verified_databases));
   text("count-all", summary.total);

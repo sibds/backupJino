@@ -135,6 +135,7 @@
             <p id="worker-description">
               Читаем отчёт и сохранённые части файлов.
             </p>
+            <p class="helper" id="ftp-budget">FTPS: общий предел 10 сеансов</p>
           </div>
           <dl class="run-totals">
             <div>
@@ -235,7 +236,7 @@
                       <th scope="col">Сервер</th>
                       <th scope="col">Доступ</th>
                       <th scope="col" class="stage-column">Выгрузка</th>
-                      <th scope="col" class="bytes-column">Сохранено</th>
+                      <th scope="col" class="bytes-column">Прогресс сервера</th>
                       <th scope="col" class="controls-column">Файлы / БД</th>
                     </tr>
                   </thead>
@@ -529,6 +530,21 @@
                 </select></label
               >
             </div>
+            <div class="job-options">
+              <label
+                >FTPS-сеансов на сервер<select id="ftp-connections">
+                  <option value="2">2</option>
+                  <option value="3" selected>3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                </select></label
+              >
+            </div>
+            <p class="helper">
+              Один сеанс читает каталоги, остальные скачивают файлы. Общий
+              предел для FTPS-заданий — 10 сеансов. Изменение применяется к
+              следующему запуску или продолжению.
+            </p>
             <label class="file-name-policy">
               <input id="skip-unsupported-names" type="checkbox" checked />
               Пропускать имена, несовместимые с Windows
@@ -536,11 +552,14 @@
             <p class="helper">
               Каталог с таким именем пропускается вместе с содержимым. Пропуски
               записываются в журнал и манифест; копия отмечается как частичная.
+              Имена с недопустимыми байтами UTF-8 также пропускаются и
+              показываются в журнале escape-последовательностями.
             </p>
             <div id="files-job" class="job-area"></div>
             <p class="helper">
-              Перед передачей выполняется подсчёт файлов и объёма.
-              Подтверждённые части сохраняются для продолжения.
+              В FTPS найденные файлы скачиваются сразу, пока обход каталогов
+              уточняет общий объём. Подтверждённые части сохраняются для
+              продолжения.
             </p>
           </section>
           <section data-card-panel="databases" hidden>
@@ -579,6 +598,7 @@
                 >События<select id="server-log-filter">
                   <option value="all">Все события</option>
                   <option value="skipped">Пропуски имён</option>
+                  <option value="directories">Ошибки каталогов</option>
                 </select></label
               >
               <button class="button secondary" id="card-refresh-logs">

@@ -117,6 +117,54 @@ def test_snapshot_has_human_names_and_never_exposes_credentials(dashboard_data):
     assert "password" not in json.dumps(data)
 
 
+def test_legacy_ftp_diagnostics_are_distinct_from_current_ftps_failures(dashboard_data):
+    from jino_backup.dashboard import make_server
+
+    playwright = pytest.importorskip("playwright.sync_api")
+    server = make_server(dashboard_data, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    address = "http://127.0.0.1:" + str(server.server_port)
+    try:
+        with playwright.sync_playwright() as pw:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(address, wait_until="networkidle")
+                results = page.evaluate("""() => {
+                  const old = {source: 'FTP', code: 'TLS_CERTIFICATE_INVALID', message: 'TLS failed'};
+                  const current = {source: 'Файлы', code: 'TRANSFER_INTERRUPTED', message: 'Transfer failed'};
+                  const server = {diagnostics: [old], latest_tasks: {}};
+                  const unchecked = displayDiagnostics(server, {table: true});
+                  const card = displayDiagnostics(server);
+                  server.latest_tasks.files = {transport: 'https_panel', progress: {directories_seen: 1}};
+                  const otherTransport = displayDiagnostics(server, {table: true});
+                  server.latest_tasks.files.transport = 'ftps';
+                  const connected = displayDiagnostics(server, {table: true});
+                  server.diagnostics.push(current);
+                  const failed = displayDiagnostics(server, {table: true});
+                  server.diagnostics[1] = {...current, code: 'TLS_CERTIFICATE_INVALID'};
+                  const failedTls = displayDiagnostics(server, {table: true});
+                  return {unchecked, card, otherTransport, connected, failed, failedTls,
+                          rawSource: server.diagnostics[0].source};
+                }""")
+                assert results["unchecked"][0]["source"] == "FTP ранее"
+                assert results["card"][0]["source"] == "Прежняя проверка FTP"
+                assert "Текущее подключение" in results["card"][0]["message"]
+                assert len(results["otherTransport"]) == 1
+                assert results["connected"] == []
+                assert [entry["code"] for entry in results["failed"]] == ["TRANSFER_INTERRUPTED"]
+                assert [entry["code"] for entry in results["failedTls"]] == ["TLS_CERTIFICATE_INVALID"]
+                assert results["failedTls"][0].get("historical") is not True
+                assert results["rawSource"] == "FTP"
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        server.monitor.close()
+
+
 def test_progress_reads_sqlite_without_changing_checkpoint(dashboard_data):
     root = (
         dashboard_data.destination
@@ -145,6 +193,52 @@ def test_progress_reads_sqlite_without_changing_checkpoint(dashboard_data):
     assert server["progress"]["verified_files"] == 1
     assert server["progress"]["current_file"]["percent"] == 25
     assert path.read_bytes() == before
+
+
+def test_server_work_progress_combines_tasks_and_ignores_current_file_percent(dashboard_data):
+    from jino_backup.dashboard import make_server
+    playwright = pytest.importorskip("playwright.sync_api")
+    server = make_server(dashboard_data, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with playwright.sync_playwright() as pw:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+            try:
+                page = browser.new_page()
+                page.goto("http://127.0.0.1:" + str(server.server_port), wait_until="networkidle")
+                results = page.evaluate("""() => {
+                  const ftp = {kind:'files',transport:'ftps',state:'RUNNING',progress:{
+                    received_bytes:400,planned_bytes:1000,inventory_complete:true,
+                    current_file:'one.bin',current_bytes:99,current_size:100}};
+                  const db = {kind:'databases',state:'RUNNING',progress:{verified_count:2,expected_count:4}};
+                  const combined=serverWorkProgress({latest_tasks:{files:ftp,databases:db}});
+                  const filesOnly=serverWorkProgress({latest_tasks:{files:ftp}});
+                  const dbOnly=serverWorkProgress({latest_tasks:{databases:db}});
+                  const unknown=serverWorkProgress({latest_tasks:{files:{...ftp,progress:{...ftp.progress,inventory_complete:false}},databases:db}});
+                  const queued=serverWorkProgress({latest_tasks:{files:ftp,databases:{...db,state:'QUEUED',progress:{}}}});
+                  const resumed=serverWorkProgress({latest_tasks:{files:ftp,databases:{...db,state:'WAITING_RATE_LIMIT'}}});
+                  const verifying=serverWorkProgress({latest_tasks:{files:{...ftp,progress:{...ftp.progress,received_bytes:1000}}}});
+                  const done=serverWorkProgress({latest_tasks:{
+                    files:{...ftp,state:'FINISHED',result:{status:'FILES_ONLY'}},
+                    databases:{...db,state:'FINISHED',result:{status:'DB_ONLY'}}}});
+                  const partial=serverWorkProgress({latest_tasks:{files:{...ftp,state:'FINISHED',result:{status:'PARTIAL'}}}});
+                  return {combined,filesOnly,dbOnly,unknown,queued,resumed,verifying,done,partial};
+                }""")
+                assert results["combined"]["percent"] == 45
+                assert results["filesOnly"]["percent"] == 40
+                assert results["dbOnly"]["percent"] == 50
+                assert results["unknown"]["percent"] is None
+                assert results["queued"]["percent"] == 20
+                assert results["resumed"]["percent"] == 45
+                assert results["verifying"]["percent"] < 100
+                assert results["done"]["percent"] == 100
+                assert results["partial"]["percent"] is None
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_dead_worker_is_not_reported_as_working_or_server_offline(dashboard_data):

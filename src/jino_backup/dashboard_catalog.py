@@ -60,6 +60,7 @@ class DashboardCatalog:
             "remote_root": "/",
             "known_hosts": "",
             "skip_unsupported_names": True,
+            "ftp_connections": 3,
             "has_panel_password": isinstance(password, str)
             and bool(password)
             and not is_hash(password),
@@ -76,6 +77,7 @@ class DashboardCatalog:
             ]
         for config in records:
             config.setdefault("skip_unsupported_names", True)
+            config.setdefault("ftp_connections", 3)
             duplicate = bool(config["panel_login"]) and any(
                 other["row"] != config["row"]
                 and not other["deleted"]
@@ -204,6 +206,10 @@ class DashboardCatalog:
                 raise BackupError("SERVER_CONFIG_INVALID")
             config["skip_unsupported_names"] = payload["skip_unsupported_names"]
         config.setdefault("skip_unsupported_names", True)
+        connections = payload.get("ftp_connections", config.get("ftp_connections", 3))
+        if type(connections) is not int or not 2 <= connections <= 5:
+            raise BackupError("CONNECTION_LIMIT_INVALID")
+        config["ftp_connections"] = connections
         credentials["panel"]["username"] = config["panel_login"]
         credentials["ftp"].update(
             host=config["ftp_host"],
