@@ -59,14 +59,15 @@ def main():
                 page.locator('tr[data-server-row="3"] select').first.dispatch_event('click')
                 expect(page.locator('#detail-name')).to_have_text('Сервер 02')
                 page.locator('tr[data-server-row="3"] .server-name').click()
-                expect(page.locator('#detail-name')).to_have_text('Сервер 03')
-                assert not page.evaluate('location.hash.startsWith("#server/")')
-                page.locator('#open-server-card').click()
                 expect(page.locator('#server-card')).to_be_visible()
                 assert page.evaluate('location.hash==="#server/3"')
                 page.locator('[data-view="servers"]').click()
                 expect(page.locator('#server-view')).to_be_visible()
-                page.locator('tr[data-server-row="2"] .server-name').click()
+                page.locator('tr[data-server-row="2"] td').nth(1).click()
+                page.locator('#open-server-card').click()
+                expect(page.locator('#server-card')).to_be_visible()
+                assert page.evaluate('location.hash==="#server/2"')
+                page.locator('[data-view="servers"]').click()
                 page.evaluate('''() => {
                     window.diagnosticOriginal = structuredClone(state.data.servers.find(s=>s.row===2));
                     const s=state.data.servers.find(s=>s.row===2);

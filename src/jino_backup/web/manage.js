@@ -10,7 +10,9 @@
   let pending = false;
   let jobFocus = null;
   let serverChoicesSignature = "";
-  const databaseDrafts = new Map();
+  const databaseSelections = new Map();
+  let databaseScope = null;
+  let databaseVisible = [];
   const labels = {
     AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
     SCHEDULED: "Запланировано",
@@ -993,59 +995,146 @@
     const server = detail.server;
     const items = server.database_inventory || [];
     const busy = (server.tasks || []).some(t => t.kind === 'databases' && activeStates.includes(t.state));
-    const disabled = pending || busy || server.blocked;
+    const disabled = pending || busy || server.blocked || !Array.isArray(server.database_inventory);
     $("database-catalog-refresh").disabled = disabled;
-    const verified = items.filter(x => x.validation === 'PASS').length;
     const expected = Math.max(items.length, ...(server.tasks || []).filter(t => t.kind === 'databases').map(t => t.progress?.expected_count || t.result?.snapshot_databases_count || 0));
+    const summary = databaseCatalogSummary(items, expected);
+    const volume = summary.unknownSizes ? summary.unknownSizes === summary.saved ? 'размер неизвестен' : bytes(summary.bytes) + ' + неизвестный объём' : bytes(summary.bytes);
     text('database-catalog-summary', items.length ?
-      `Проверено ${verified} из ${expected}. Названий в справочнике: ${items.length}.` :
+      `Скачано ${summary.saved} из ${summary.total} · Последние копии: ${volume}` :
       'Список ещё не получен. Обновите его из Jino или запустите выгрузку.');
+    const scope = selected + ':' + server.configuration.revision;
+    if (databaseScope !== scope) {
+      databaseScope = scope;
+      $('db-bulk-schedule').hidden = true;
+      $('db-schedule-toggle').setAttribute('aria-expanded', 'false');
+      $('db-search').value = ''; $('db-filter').value = 'all';
+    }
+    const choices = databaseSelections.get(scope) || new Set();
+    const known = new Set(items.map(item => item.db_alias));
+    if (Array.isArray(server.database_inventory))
+      for (const alias of choices) if (!known.has(alias)) choices.delete(alias);
+    databaseSelections.set(scope, choices);
+    const query = $('db-search').value.trim().toLocaleLowerCase('ru-RU');
+    const filter = $('db-filter').value;
+    const visible = items.filter(item => {
+      const copy = databaseCopyState(item);
+      return item.name.toLocaleLowerCase('ru-RU').includes(query) &&
+        (filter === 'all' || filter === 'saved' && copy.saved || filter === 'missing' && !copy.saved ||
+          filter === 'newer' && copy.newer || filter === 'scheduled' && item.schedule?.enabled);
+    });
+    databaseVisible = visible.map(item => item.db_alias);
+    text('db-filter-count', summary.total > items.length ? `Показано ${visible.length}; названия получены для ${items.length} из ${summary.total}` : `Показано ${visible.length} из ${items.length}`);
+    text('db-selected-count', `Выбрано ${choices.size}`);
+    const all = $('db-select-all');
+    all.checked = visible.length > 0 && visible.every(item => choices.has(item.db_alias));
+    all.indeterminate = !all.checked && visible.some(item => choices.has(item.db_alias));
+    all.disabled = !visible.length || pending || server.blocked;
+    $('db-download-selected').disabled = disabled || !choices.size;
+    for (const id of ['db-schedule-toggle','db-schedule-apply','db-schedule-disable','db-clear-selection'])
+      $(id).disabled = pending || server.blocked || !choices.size;
+    $('db-schedule-preset').disabled = pending || server.blocked;
+    $('db-schedule-hours').disabled = pending || server.blocked || $('db-schedule-preset').value !== 'custom';
+    $('db-operation-note').hidden = !busy;
+    text('db-operation-note', busy ? 'Задание БД уже выполняется или ожидает запуска. Расписание можно изменить сейчас; новую выгрузку — после завершения задания.' : '');
     const focused = target.contains(document.activeElement) ? document.activeElement.id : null;
     const fragment = document.createDocumentFragment();
-    for (const item of items) {
-      const article = node('article', 'database-item');
-      const info = node('div', 'database-item-info');
-      const heading = node('div', 'database-item-heading');
-      heading.append(node('h4', '', item.name), node('span', 'badge ' + (item.validation === 'PASS' ? 'good' : ''), item.validation === 'PASS' ? 'Дамп проверен' : 'Нет проверенного дампа'));
-      const time = item.downloaded_at ? new Date(item.downloaded_at).toLocaleString('ru-RU') : 'Дата не зафиксирована';
-      info.append(heading,
-        node('p', 'helper', 'Снимок: ' + (item.snapshot_date || item.available_snapshot_date ? dateLabel(item.snapshot_date || item.available_snapshot_date) : '—') + ' · Выгружено: ' + time),
-        node('p', 'helper', item.size_bytes ? bytes(item.size_bytes) : 'Проверенные дампы сохраняются и при ошибке общего задания.'));
-      const key = selected + ':' + item.db_alias;
-      const schedule = item.schedule || {enabled:false,every_hours:24};
-      const draft = databaseDrafts.get(key) || {enabled:schedule.enabled,hours:schedule.every_hours};
-      const form = node('div', 'database-item-controls');
+    for (const item of visible) {
+      const copy = databaseCopyState(item);
+      const article = node('tr', 'database-item');
+      article.classList.toggle('database-selected', choices.has(item.db_alias));
+      const info = node('td', 'database-item-name');
       const checkbox = document.createElement('input');
-      checkbox.type='checkbox'; checkbox.checked=draft.enabled;
-      checkbox.id='db-enabled-'+item.db_alias;
-      const enabledLabel=node('label', 'database-enabled'); enabledLabel.append(checkbox,document.createTextNode('По расписанию'));
-      const hours=document.createElement('input');
-      hours.type='number'; hours.min='1'; hours.max='8760'; hours.step='1'; hours.value=draft.hours;
-      hours.id='db-hours-'+item.db_alias;
-      const hoursLabel=node('label','database-hours','Каждые, часов'); hoursLabel.append(hours);
-      const remember=()=>databaseDrafts.set(key,{enabled:checkbox.checked,hours:Number(hours.value)});
-      checkbox.addEventListener('change',remember); hours.addEventListener('input',remember);
-      const save=actionButton('Сохранить расписание',()=>{
-        if (!hours.reportValidity()) return;
-        command('/api/servers/'+selected+'/database-schedules',{
-          db_alias:item.db_alias,every_hours:Number(hours.value),enabled:checkbox.checked,
-        },()=>databaseDrafts.delete(key));
-      },pending || server.blocked);
-      save.id='db-save-'+item.db_alias;
-      const download=actionButton('Выгрузить эту БД',()=>{
-        const payload={kind:'databases',db_aliases:[item.db_alias],new_version:true};
-        if ($('db-snapshot-date').value) payload.snapshot_date=$('db-snapshot-date').value;
-        command('/api/servers/'+selected+'/jobs',payload);
-      },disabled);
-      const next = schedule.enabled && schedule.next_at ? 'Следующая постановка: '+new Date(schedule.next_at).toLocaleString('ru-RU') : 'Расписание выключено';
-      checkbox.disabled=hours.disabled=pending || server.blocked;
-      form.append(enabledLabel,hoursLabel,save,download,node('p','helper database-next',next));
-      article.append(info,form); fragment.append(article);
+      checkbox.type = 'checkbox'; checkbox.checked = choices.has(item.db_alias);
+      checkbox.disabled = pending || server.blocked;
+      checkbox.id = 'db-select-' + item.db_alias;
+      checkbox.setAttribute('aria-label', 'Выбрать БД ' + item.name);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) choices.add(item.db_alias); else choices.delete(item.db_alias);
+        renderDatabaseCatalog();
+      });
+      const name = node('label', 'database-name'); name.htmlFor = checkbox.id;
+      name.append(node('span','',item.name), node('span','database-copy-state ' + (copy.saved ? 'good' : ''),
+        copy.saved ? 'Скачано · проверено' : 'Нет проверенной копии'));
+      const nameGroup = node('div','database-name-group'); nameGroup.append(checkbox,name);
+      info.append(nameGroup);
+      const size = node('td','database-size', copy.saved && Number.isSafeInteger(item.size_bytes) && item.size_bytes >= 0 ? bytes(item.size_bytes) : copy.saved ? 'Неизвестен' : '—');
+      size.dataset.label = 'Размер копии';
+      const downloaded = node('td','database-downloaded'); downloaded.dataset.label = 'Скачано';
+      const stamp = item.downloaded_at && !Number.isNaN(Date.parse(item.downloaded_at)) ? new Date(item.downloaded_at) : null;
+      downloaded.append(node('span','', copy.saved ? stamp ? stamp.toLocaleDateString('ru-RU') : 'Дата неизвестна' : 'Ещё не скачано'));
+      if (copy.saved && stamp) downloaded.append(node('span','helper',stamp.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})));
+      const snapshot = node('td','database-snapshot'); snapshot.dataset.label = 'Исходный снимок';
+      snapshot.append(node('span','',copy.saved ? item.snapshot_date ? dateLabel(item.snapshot_date) : 'Дата неизвестна' : '—'));
+      if (copy.newer) snapshot.append(node('span','database-copy-state warning','Есть снимок новее: ' + dateLabel(item.available_snapshot_date)));
+      else if (!copy.saved && item.available_snapshot_date) snapshot.append(node('span','helper','Доступен: ' + dateLabel(item.available_snapshot_date)));
+      const schedule = item.schedule || {};
+      const scheduled = node('td','database-schedule'); scheduled.dataset.label = 'Расписание';
+      const edit = actionButton(schedule.enabled ? databaseIntervalLabel(schedule.every_hours) : 'Настроить', () => {
+        choices.clear(); choices.add(item.db_alias);
+        $('db-bulk-schedule').hidden = false;
+        $('db-schedule-toggle').setAttribute('aria-expanded','true');
+        const preset = [24,72,168].includes(schedule.every_hours) ? String(schedule.every_hours) : schedule.every_hours ? 'custom' : '168';
+        $('db-schedule-preset').value = preset;
+        $('db-schedule-hours').value = schedule.every_hours || 72;
+        $('db-custom-period').hidden = preset !== 'custom';
+        renderDatabaseCatalog(); $('db-schedule-preset').focus();
+      }, pending || server.blocked);
+      edit.className = 'button text-button database-schedule-action';
+      edit.setAttribute('aria-label', 'Расписание БД ' + item.name);
+      scheduled.append(edit, node('span','helper database-next',schedule.enabled && schedule.next_at ? 'Следующая постановка: ' + new Date(schedule.next_at).toLocaleString('ru-RU',{dateStyle:'short',timeStyle:'short'}) : 'Выключено'));
+      const actions = node('td','database-row-actions');
+      const download = actionButton('Скачать', () => downloadDatabases([item.db_alias]), disabled);
+      download.setAttribute('aria-label','Скачать БД ' + item.name);
+      actions.append(download);
+      article.append(info,size,downloaded,snapshot,scheduled,actions); fragment.append(article);
     }
-    if (!items.length) fragment.append(node('p','empty-state','Пока нет подтверждённых названий БД. Чтение списка можно поставить в очередь кнопкой выше.'));
+    if (!visible.length) {
+      const row = node('tr'), cell = node('td','empty-state', items.length ? 'Нет баз по выбранному фильтру. Измените поиск или выберите «Все базы».' : 'Названия БД ещё не получены. Нажмите «Обновить список из Jino», чтобы поставить чтение списка в очередь.');
+      cell.colSpan = 6; row.append(cell); fragment.append(row);
+    }
     target.replaceChildren(fragment);
     if (focused) document.getElementById(focused)?.focus({preventScroll:true});
   }
+  function selectedDatabases() { return Array.from(databaseSelections.get(databaseScope) || []); }
+  function downloadDatabases(aliases) {
+    if (!aliases.length) return;
+    command('/api/servers/'+selected+'/jobs',{kind:'databases',db_aliases:aliases,new_version:true},
+      () => message(`Выгрузка ${aliases.length} БД добавлена в очередь. Используется последний доступный снимок.`));
+  }
+  $('db-search').addEventListener('input',renderDatabaseCatalog);
+  $('db-filter').addEventListener('change',renderDatabaseCatalog);
+  $('db-select-all').addEventListener('change', () => {
+    const choices = databaseSelections.get(databaseScope);
+    for (const alias of databaseVisible) {
+      if ($('db-select-all').checked) choices.add(alias); else choices.delete(alias);
+    }
+    renderDatabaseCatalog();
+  });
+  $('db-clear-selection').addEventListener('click', () => {
+    databaseSelections.get(databaseScope)?.clear(); renderDatabaseCatalog();
+  });
+  $('db-download-selected').addEventListener('click', () => downloadDatabases(selectedDatabases()));
+  $('db-schedule-toggle').addEventListener('click', () => {
+    $('db-bulk-schedule').hidden = !$('db-bulk-schedule').hidden;
+    $('db-schedule-toggle').setAttribute('aria-expanded', String(!$('db-bulk-schedule').hidden));
+    if (!$('db-bulk-schedule').hidden) $('db-schedule-preset').focus();
+  });
+  $('db-schedule-preset').addEventListener('change', () => {
+    $('db-custom-period').hidden = $('db-schedule-preset').value !== 'custom';
+    renderDatabaseCatalog();
+  });
+  function saveDatabaseSchedule(enabled) {
+    const aliases = selectedDatabases();
+    if (!aliases.length) return;
+    const custom = $('db-schedule-preset').value === 'custom';
+    if (enabled && custom && !$('db-schedule-hours').reportValidity()) return;
+    const hours = enabled ? Number(custom ? $('db-schedule-hours').value : $('db-schedule-preset').value) : 168;
+    command('/api/servers/'+selected+'/database-schedules',{db_aliases:aliases,every_hours:hours,enabled},
+      () => message(enabled ? `Расписание сохранено для ${aliases.length} БД. ${databaseIntervalLabel(hours)}.` : `Расписание выключено для ${aliases.length} БД. Копии сохранены.`));
+  }
+  $('db-bulk-schedule').addEventListener('submit', event => {event.preventDefault(); saveDatabaseSchedule(true);});
+  $('db-schedule-disable').addEventListener('click', () => saveDatabaseSchedule(false));
   $("database-catalog-refresh").addEventListener('click',()=>{
     const payload={kind:'databases',inspect_only:true,new_version:true};
     if ($('db-snapshot-date').value) payload.snapshot_date=$('db-snapshot-date').value;

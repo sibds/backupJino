@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone, timedelta
 from .dashboard_catalog import DashboardCatalog
 from .downloads import FileLock
 from .errors import BackupError
+from .importers import identity
 from .panel_access import PanelAccessPolicy, iso_time
 
 
@@ -543,16 +544,21 @@ class DashboardManagement:
                 for item in self.inventory.list(server['row'], server['binding_revision']):
                     schedule = item.get('schedule') or {}
                     if schedule.get('enabled') and self._scheduled_timestamp(schedule['next_at']) <= time.time():
-                        occurrence = item['db_alias'] + ':' + schedule['next_at']
+                        group = [other for other in self.inventory.list(server['row'], server['binding_revision'])
+                                 if other.get('schedule', {}).get('enabled')
+                                 and other['schedule'].get('next_at') == schedule['next_at']
+                                 and other['schedule'].get('every_hours') == schedule['every_hours']]
+                        aliases = sorted(other['db_alias'] for other in group)
+                        occurrence = (aliases[0] if len(aliases) == 1 else identity('db-group', *aliases)) + ':' + schedule['next_at']
                         existing = next((t for t in self.tasks(server['row']) if t.get('schedule_occurrence') == occurrence), None)
                         try:
-                            task = existing or self.start(server['row'], 'databases', {'db_aliases':[item['db_alias']], 'new_version':True, 'schedule_occurrence':occurrence})
+                            task = existing or self.start(server['row'], 'databases', {'db_aliases':aliases, 'new_version':True, 'schedule_occurrence':occurrence})
                         except BackupError as error:
                             if schedule.get('last_error') != error.code:
                                 self.event(server['row'], 'SCHEDULE_WAIT', kind='databases', code=error.code)
                             self.inventory._update(server['row'], server['binding_revision'], item['db_alias'], schedule={**schedule, 'last_error':error.code})
                             continue
-                        self.inventory.advance(server['row'], server['binding_revision'], item['db_alias'], schedule, task['id'])
+                        self.inventory.advance_group(server['row'], server['binding_revision'], group, task['id'])
                         break
         finally:
             self.scheduling_databases = False

@@ -325,6 +325,20 @@ function toast(message) {
   toast.timer = setTimeout(() => ($("toast").hidden = true), 5000);
   text("announcement", message);
 }
+function databaseCatalogSummary(items, expected = items.length) {
+  const copies = items.filter((item) => item.validation === "PASS");
+  const known = copies.filter((item) => Number.isSafeInteger(item.size_bytes) && item.size_bytes >= 0);
+  return {saved: copies.length, total: Math.max(expected, items.length),
+    bytes: known.reduce((sum, item) => sum + item.size_bytes, 0), unknownSizes: copies.length - known.length};
+}
+function databaseCopyState(item) {
+  const saved = item.validation === "PASS";
+  return {saved, newer: !!(saved && item.snapshot_date && item.available_snapshot_date
+    && item.available_snapshot_date > item.snapshot_date)};
+}
+function databaseIntervalLabel(hours) {
+  return ({168:"Раз в неделю", 72:"Каждые 72 часа", 24:"Каждые 24 часа"})[hours] || `Каждые ${hours} ч`;
+}
 function displayDiagnostics(server, { table = false } = {}) {
   const task = server.latest_tasks?.files;
   const started = (value) => !!(value?.started_at || value?.first_started_at);
@@ -690,7 +704,10 @@ function renderTable() {
     const button = element("button", "server-name", server.name);
     button.dataset.row = server.row;
     button.title = server.name;
-    button.addEventListener("click", () => selectServer(server.row, true));
+    button.addEventListener("click", () => {
+      selectServer(server.row);
+      document.dispatchEvent(new CustomEvent("backup:select", {detail: {row: server.row}}));
+    });
     nameCell.append(
       button,
       element("span", "server-login", server.login),

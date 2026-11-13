@@ -68,15 +68,36 @@ class DatabaseInventory:
     def schedule(self, row, revision, payload):
         if self.cipher is None:
             raise BackupError('NOT_INITIALIZED')
-        alias = payload.get('db_alias')
-        if not any(x['db_alias']==alias for x in self.list(row, revision)):
+        aliases = payload.get('db_aliases', [payload.get('db_alias')])
+        if ('db_aliases' in payload and 'db_alias' in payload
+                or not isinstance(aliases, list) or not aliases
+                or len(aliases) > 500 or not all(isinstance(x, str) for x in aliases)):
             raise BackupError('DATABASE_SCOPE_UNVERIFIED')
         hours, enabled = payload.get('every_hours'), payload.get('enabled')
         if type(hours) is not int or not 1 <= hours <= 8760 or type(enabled) is not bool:
             raise BackupError('REQUEST_INVALID')
         next_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat() if enabled else None
-        self._update(row, revision, alias, schedule={'enabled':enabled, 'every_hours':hours, 'next_at':next_at})
-        return {'ok':True}
+        schedules = {alias:{'enabled':enabled, 'every_hours':hours, 'next_at':next_at} for alias in aliases}
+        self._set_schedules(row, revision, schedules)
+        return {'ok':True, 'updated_count':len(schedules), 'next_at':next_at}
+
+    def _set_schedules(self, row, revision, schedules):
+        with self.connection() as db:
+            rows = db.execute('SELECT alias,payload FROM databases WHERE row_id=? AND revision=?', (row, revision)).fetchall()
+            known = {alias:payload for alias,payload in rows}
+            if not schedules.keys() <= known.keys():
+                raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+            updates = []
+            for alias, schedule in schedules.items():
+                item = json.loads(self.cipher.decrypt(known[alias]))
+                item['schedule'] = schedule
+                updates.append((self.cipher.encrypt(json.dumps(item).encode()), row, revision, alias))
+            db.executemany('UPDATE databases SET payload=? WHERE row_id=? AND revision=? AND alias=?', updates)
+
+    def advance_group(self, row, revision, items, task_id):
+        next_at = (datetime.now(timezone.utc)+timedelta(hours=items[0]['schedule']['every_hours'])).isoformat()
+        self._set_schedules(row, revision, {item['db_alias']:{**item['schedule'], 'next_at':next_at,
+            'last_task_id':task_id} for item in items})
 
     def advance(self, row, revision, alias, schedule, task_id):
         next_at = (datetime.now(timezone.utc)+timedelta(hours=schedule['every_hours'])).isoformat()

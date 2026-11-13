@@ -3,6 +3,27 @@ import pytest
 from jino_backup.errors import BackupError
 
 
+@pytest.mark.parametrize('hours', [72, 168])
+def test_bulk_schedule_is_atomic_scoped_and_keeps_a_common_due_time(tmp_path, hours):
+    from jino_backup.database_inventory import DatabaseInventory
+    inventory = DatabaseInventory(tmp_path / 'inventory.sqlite3', Fernet.generate_key())
+    inventory.discover(1, 1, 'panel-example', ['one', 'two', 'three'])
+    aliases = [x['db_alias'] for x in inventory.list(1, 1)]
+    inventory.schedule(1, 1, {'db_aliases':aliases[:2], 'every_hours':hours, 'enabled':True})
+    rows = inventory.list(1, 1)
+    assert rows[0]['schedule']['every_hours'] == rows[1]['schedule']['every_hours'] == hours
+    assert rows[0]['schedule']['next_at'] == rows[1]['schedule']['next_at']
+    assert not rows[2].get('schedule')
+    before = rows
+    with pytest.raises(BackupError, match='DATABASE_SCOPE_UNVERIFIED'):
+        inventory.schedule(1, 1, {'db_aliases':[aliases[0], 'unknown'], 'every_hours':24, 'enabled':False})
+    assert inventory.list(1, 1) == before
+    with pytest.raises(BackupError):
+        inventory.schedule(1, 2, {'db_aliases':aliases[:2], 'every_hours':hours, 'enabled':True})
+    inventory.schedule(1, 1, {'db_aliases':aliases[:2], 'every_hours':hours, 'enabled':False})
+    assert all(not x['schedule']['enabled'] and x['schedule']['next_at'] is None for x in inventory.list(1, 1)[:2])
+
+
 def test_inventory_preserves_verified_partial_jobs_and_encrypts_names(tmp_path):
     from jino_backup.database_inventory import DatabaseInventory
     inventory = DatabaseInventory(tmp_path / 'inventory.sqlite3', Fernet.generate_key())

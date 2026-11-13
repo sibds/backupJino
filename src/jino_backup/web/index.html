@@ -586,6 +586,45 @@
             </p>
           </section>
           <section data-card-panel="databases" hidden>
+            <section class="database-catalog" aria-labelledby="database-catalog-heading">
+              <div class="database-catalog-heading"><div>
+                <h3 id="database-catalog-heading">Копии баз данных</h3>
+                <p id="database-catalog-summary" class="database-summary">Загружаем сведения о копиях…</p>
+              </div><button id="database-catalog-refresh" class="button secondary">Обновить список из Jino</button></div>
+              <p class="helper">Скачиваем последний доступный снимок Jino. Дата снимка показывает возраст данных, дата скачивания — когда копия сохранена здесь.</p>
+              <div class="database-filters">
+                <label>Поиск по названию<input id="db-search" type="search" placeholder="Найти базу данных" /></label>
+                <label>Показать<select id="db-filter"><option value="all">Все базы</option><option value="saved">Скачанные</option><option value="missing">Без копии</option><option value="newer">Есть снимок новее</option><option value="scheduled">С расписанием</option></select></label>
+                <span id="db-filter-count" class="helper"></span>
+              </div>
+              <div class="database-selection" role="group" aria-label="Действия с выбранными базами">
+                <label class="database-select-all"><input id="db-select-all" type="checkbox" />Выбрать видимые</label>
+                <span id="db-selected-count" role="status">Выбрано 0</span>
+                <div class="database-bulk-actions">
+                  <button id="db-download-selected" class="button primary" disabled>Скачать выбранные</button>
+                  <button id="db-schedule-toggle" class="button secondary" aria-expanded="false" aria-controls="db-bulk-schedule" disabled>Настроить расписание</button>
+                  <button id="db-clear-selection" class="button text-button" disabled>Снять выбор</button>
+                </div>
+              </div>
+              <form id="db-bulk-schedule" class="database-schedule-editor" hidden>
+                <h4>Расписание выбранных БД</h4>
+                <p class="helper">Первая постановка — через выбранный интервал. Настройка заменит расписание только у выбранных баз.</p>
+                <div class="database-schedule-fields">
+                  <label>Периодичность<select id="db-schedule-preset"><option value="168">Раз в неделю</option><option value="72">Каждые 72 часа</option><option value="24">Каждые 24 часа</option><option value="custom">Другой интервал</option></select></label>
+                  <label id="db-custom-period" hidden>Каждые, часов<input id="db-schedule-hours" type="number" min="1" max="8760" step="1" value="72" required /></label>
+                  <button id="db-schedule-apply" class="button primary" type="submit">Применить расписание</button>
+                  <button id="db-schedule-disable" class="button secondary" type="button">Выключить расписание</button>
+                </div>
+                <p class="helper">Работает, пока запущена панель. Начало может сдвинуться из-за допуска входов в Jino. Новый снимок не создаётся.</p>
+              </form>
+              <p id="db-operation-note" class="helper" hidden></p>
+              <div class="database-catalog-list"><table class="database-table" aria-label="Последние копии баз данных">
+                <thead><tr><th scope="col">База данных</th><th scope="col">Размер копии</th><th scope="col">Скачано</th><th scope="col">Исходный снимок</th><th scope="col">Расписание</th><th scope="col"><span class="sr-only">Действия</span></th></tr></thead>
+                <tbody id="database-catalog-list"></tbody>
+              </table></div>
+              <p class="helper database-storage-note">Объём указан для последних проверенных копий. Старые версии и незавершённые части в сумму не входят.</p>
+            </section>
+            <details class="database-all-options"><summary>Все базы и параметры задания</summary>
             <div class="job-heading">
               <div>
                 <h3>Выгрузка дампов MySQL</h3>
@@ -613,14 +652,7 @@
               >
             </div>
             <div id="databases-job" class="job-area"></div>
-            <section class="database-catalog" aria-labelledby="database-catalog-heading">
-              <div class="database-catalog-heading"><div>
-                <h3 id="database-catalog-heading">Базы данных и расписание</h3>
-                <p id="database-catalog-summary" class="helper">Сведения из локального журнала и панели Jino.</p>
-              </div><button id="database-catalog-refresh" class="button secondary">Обновить список из Jino</button></div>
-              <p class="helper">Обновление списка не заказывает SQL. Выгрузка использует существующий снимок Jino, новый снимок не создаётся. Расписание работает, пока запущена панель; входы подчиняются общему часовому допуску. Пропущенные интервалы объединяются в один запуск.</p>
-              <div id="database-catalog-list" class="database-catalog-list"></div>
-            </section>
+            </details>
           </section>
           <section data-card-panel="logs" hidden>
             <div class="job-heading">

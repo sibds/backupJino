@@ -34,6 +34,34 @@ def test_database_interval_enqueues_one_selected_job_without_duplicate_ticks(man
         release.set()
 
 
+def test_matching_due_database_schedules_share_one_job_and_one_occurrence(management):
+    management.inventory.discover(1, 1, management.catalog.get(1)['account_ref'], ['one', 'two', 'other'])
+    items = management.inventory.list(1, 1)
+    aliases = [x['db_alias'] for x in items[:2]]
+    for alias in aliases:
+        management.inventory._update(1, 1, alias,
+            schedule={'enabled':True, 'every_hours':72, 'next_at':'2020-01-01T00:00:00Z'})
+    original = management._schedule
+    management._schedule = lambda:None
+    management._schedule_databases()
+    tasks = management.tasks(1)
+    assert len(tasks) == 1 and tasks[0]['db_aliases'] == sorted(aliases)
+    after = management.inventory.list(1, 1)
+    assert after[0]['schedule']['next_at'] == after[1]['schedule']['next_at']
+    assert after[0]['schedule']['last_task_id'] == after[1]['schedule']['last_task_id'] == tasks[0]['id']
+    management._schedule_databases()
+    assert len(management.tasks(1)) == 1
+    # Recover after the task was persisted but the inventory advance was lost.
+    management._update(tasks[0]['id'], state='FAILED')
+    for alias in aliases:
+        management.inventory._update(1, 1, alias,
+            schedule={'enabled':True, 'every_hours':72, 'next_at':'2020-01-01T00:00:00Z'})
+    management._schedule_databases()
+    assert len(management.tasks(1)) == 1
+    assert all(x['schedule']['last_task_id'] == tasks[0]['id'] for x in management.inventory.list(1,1)[:2])
+    management._schedule = original
+
+
 def test_database_inspection_reads_jino_names_without_exporting(management, monkeypatch):
     from test_panel_export import PanelFixture
     class Panel(PanelFixture):
