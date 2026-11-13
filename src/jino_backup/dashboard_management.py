@@ -794,6 +794,7 @@ class DashboardManagement:
                 'metadata_mlst_checks',
                 'metadata_listing_checks',
                 'processed_files',
+                'local_verifications', 'pending_verifications',
                 "received_bytes",
                 "planned_bytes",
                 "planned_files",

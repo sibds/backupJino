@@ -180,6 +180,28 @@ class DirectoryCheckpoint:
         os.replace(partial, local)
         self.record(relative, entry, 'done', entry.size, digest.hexdigest())
 
+    def verify_done(self, relative, entry, control):
+        """Check a completed local file without a network session or DB lock during hashing."""
+        local = local_path(self.root, 'files/' + relative)
+        with self.mutex:
+            row = self.db.execute('SELECT * FROM files WHERE path=?', (relative,)).fetchone()
+        if (not row or row['state'] != 'done' or row['size'] != entry.size
+                or not entry.modified or row['modified'] != entry.modified):
+            raise BackupError('SOURCE_CHANGED')
+        if not local.is_file() or local.stat().st_size != entry.size:
+            raise BackupError('LOCAL_FILE_CHANGED')
+        digest = hashlib.sha256()
+        with local.open('rb') as stream:
+            while True:
+                control.checkpoint()
+                chunk = stream.read(CHUNK)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        if local.stat().st_size != entry.size or digest.hexdigest() != row['sha256']:
+            raise BackupError('LOCAL_FILE_CHANGED')
+        return {'path':relative, 'size_bytes':entry.size, 'sha256':digest.hexdigest()}
+
     def committed_offset(self, relative):
         with self.mutex:
             row = self.db.execute('SELECT committed FROM files WHERE path=?', (relative,)).fetchone()

@@ -37,10 +37,11 @@ def test_resume_reports_verification_work_without_redownloading_saved_files(tmp_
         value.stat=lambda path:checks.append(path) or original(path)
         if reused:
             value.download=lambda *args:pytest.fail('Saved file downloaded again')
+        value.listdir=lambda path:FixtureSource(root).listdir(path)
         return value
     def collector():
         return ParallelCollector(TaskControl(lambda state:None),lambda **e:events.append(e),ConnectionBudget(10),
-            metadata_factory=lambda *args:FixtureSource(root),download_factory=downloader)
+            metadata_factory=downloader,download_factory=downloader)
     with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
         collector().collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
     reused=True
