@@ -26,3 +26,10 @@ test('intervals have explicit human labels for weekly and 72-hour schedules',()=
  assert.equal(context.databaseIntervalLabel(24),'Каждые 24 часа');
  assert.equal(context.databaseIntervalLabel(36),'Каждые 36 ч');
 });
+test('one-click missing download excludes every verified copy, including old snapshots and zero-sized records',()=>{
+ const items=[{db_alias:'saved-old',validation:'PASS',snapshot_date:'2026-11-10',available_snapshot_date:'2026-11-14'},
+  {db_alias:'zero',validation:'PASS',size_bytes:0},{db_alias:'missing'},
+  {db_alias:'partial',validation:'FAIL'},{db_alias:'missing'}];
+ assert.deepEqual(Array.from(context.databaseMissingAliases(items)),['missing','partial']);
+ assert.equal(context.databaseMissingAliases(items.slice(0,2)).length,0);
+});

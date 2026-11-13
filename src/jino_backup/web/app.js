@@ -336,6 +336,10 @@ function databaseCopyState(item) {
   return {saved, newer: !!(saved && item.snapshot_date && item.available_snapshot_date
     && item.available_snapshot_date > item.snapshot_date)};
 }
+function databaseMissingAliases(items) {
+  return [...new Set(items.filter((item) => !databaseCopyState(item).saved)
+    .map((item) => item.db_alias).filter((alias) => typeof alias === "string" && alias))];
+}
 function databaseIntervalLabel(hours) {
   return ({168:"Раз в неделю", 72:"Каждые 72 часа", 24:"Каждые 24 часа"})[hours] || `Каждые ${hours} ч`;
 }

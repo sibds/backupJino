@@ -999,6 +999,14 @@
     $("database-catalog-refresh").disabled = disabled;
     const expected = Math.max(items.length, ...(server.tasks || []).filter(t => t.kind === 'databases').map(t => t.progress?.expected_count || t.result?.snapshot_databases_count || 0));
     const summary = databaseCatalogSummary(items, expected);
+    const missing = databaseMissingAliases(items);
+    text('db-download-missing', `Скачать недостающие (${missing.length})`);
+    $('db-download-missing').disabled = disabled || !missing.length;
+    $('db-download-missing').title = missing.length
+      ? 'Все известные БД сервера без проверенной копии, независимо от поиска и выбранных строк'
+      : !items.length || expected > items.length
+        ? 'Обновите список из Jino, чтобы получить недостающие названия БД'
+        : 'Для всех известных БД уже есть проверенные копии';
     const volume = summary.unknownSizes ? summary.unknownSizes === summary.saved ? 'размер неизвестен' : bytes(summary.bytes) + ' + неизвестный объём' : bytes(summary.bytes);
     text('database-catalog-summary', items.length ?
       `Скачано ${summary.saved} из ${summary.total} · Последние копии: ${volume}` :
@@ -1115,6 +1123,8 @@
     databaseSelections.get(databaseScope)?.clear(); renderDatabaseCatalog();
   });
   $('db-download-selected').addEventListener('click', () => downloadDatabases(selectedDatabases()));
+  $('db-download-missing').addEventListener('click', () =>
+    downloadDatabases(databaseMissingAliases(detail?.server?.database_inventory || [])));
   $('db-schedule-toggle').addEventListener('click', () => {
     $('db-bulk-schedule').hidden = !$('db-bulk-schedule').hidden;
     $('db-schedule-toggle').setAttribute('aria-expanded', String(!$('db-bulk-schedule').hidden));

@@ -57,6 +57,8 @@ def main():
                 page.locator('[data-card-tab="databases"]').click()
                 expect(page.locator('.database-item')).to_have_count(6)
                 expect(page.locator('#database-catalog-summary')).to_contain_text('Скачано 4 из 6')
+                expect(page.locator('#db-download-missing')).to_have_text('Скачать недостающие (2)')
+                expect(page.locator('#db-download-missing')).to_be_enabled()
                 expect(page.locator('#database-catalog-list')).to_contain_text('Есть снимок новее')
                 expect(page.locator('.database-item').nth(2).locator('.database-size')).to_have_text('0 Б')
                 expect(page.locator('.database-item').nth(4).locator('.database-size')).to_have_text('Неизвестен')
@@ -124,6 +126,20 @@ def main():
                     assert management.tasks(1)[0]['state']=='QUEUED'
                     expect(page.locator('#db-download-selected')).to_be_disabled()
                     expect(page.locator('#db-operation-note')).to_be_visible()
+                    expect(page.locator('#db-download-missing')).to_be_disabled()
+                    management.action(management.tasks(1)[0]['id'],'stop')
+                    page.locator('#refresh').click()
+                    expect(page.locator('#db-operation-note')).to_be_hidden()
+                    page.locator('#db-search').fill('client_catalog')
+                    expect(page.locator('.database-item')).to_have_count(2)
+                    expect(page.locator('#db-download-missing')).to_be_enabled()
+                    writes_before = sum(path.endswith('/jobs') for path,_ in writes)
+                    page.locator('#db-download-missing').evaluate('(button)=>{button.click();button.click();}')
+                    expect(page.locator('#db-operation-note')).to_be_visible()
+                    missing = sorted(item['db_alias'] for index,item in enumerate(items) if index in (3,5))
+                    assert management.tasks(1)[0]['db_aliases'] == missing
+                    assert sum(path.endswith('/jobs') for path,_ in writes) == writes_before + 1
+                    page.locator('#db-search').fill('')
                     page.evaluate('window.scrollTo(0,0)')
                     page.screenshot(path=str(captures/f'database-busy-{width}.png'),full_page=True)
                     def empty_catalog(route):
@@ -137,6 +153,7 @@ def main():
                     page.locator('[data-card-tab="databases"]').click()
                     expect(page.locator('#database-catalog-list')).to_contain_text('Названия БД ещё не получены')
                     expect(page.locator('#db-download-selected')).to_be_disabled()
+                    expect(page.locator('#db-download-missing')).to_be_disabled()
                     page.evaluate('window.scrollTo(0,0)')
                     page.screenshot(path=str(captures/f'database-empty-{width}.png'),full_page=True)
                 page.close()
