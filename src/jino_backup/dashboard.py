@@ -598,6 +598,7 @@ class DashboardData:
                     if task.get("error_code")
                     else None
                 )
+                task['auto_resume_message'] = ERROR_LABELS.get(task.get('auto_resume_error'))
             server["diagnostics"] = []
             sources = [
                 ("Панель", item),

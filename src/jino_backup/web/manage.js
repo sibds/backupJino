@@ -12,6 +12,7 @@
   let serverChoicesSignature = "";
   const databaseDrafts = new Map();
   const labels = {
+    AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
     SCHEDULED: "Запланировано",
     WAITING_RATE_LIMIT: "Ожидает часового интервала",
     WAITING_OPERATOR: "Ожидает оператора",
@@ -397,6 +398,9 @@
       const task = server.latest_tasks?.[kind];
       const target = $(kind + "-job");
       const fragment = document.createDocumentFragment();
+      if (task?.auto_resume_at) fragment.append(node('p','notice warning',
+        'Автопродолжение №' + task.auto_resume_count + ': ' + new Date(task.auto_resume_at).toLocaleString('ru-RU') +
+        '. ' + (task.auto_resume_message || 'Временный сбой соединения') + '. Сохранённые части будут использованы повторно.'));
       if (kind === 'databases' && task?.inspect_only) fragment.append(node('p','helper','Только чтение списка БД из Jino. SQL не заказывается.'));
       const controls = node("div", "job-controls");
       const active = task && activeStates.includes(task.state);

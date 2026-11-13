@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 
 from .dashboard_catalog import DashboardCatalog
 from .downloads import FileLock
@@ -16,6 +16,10 @@ from .panel_access import PanelAccessPolicy, iso_time
 WAITING = {"QUEUED", "SCHEDULED", "WAITING_RATE_LIMIT", "WAITING_OPERATOR"}
 ACTIVE = WAITING | {"RUNNING", "PAUSING", "PAUSED", "STOPPING"}
 TERMINAL = {"FINISHED", "FAILED", "STOPPED", "INTERRUPTED"}
+AUTO_FILE_ERRORS = {"TRANSFER_INTERRUPTED", "CONNECTION_FAILED", "SFTP_CONNECTION_FAILED",
+                    "OPERATION_TIMEOUT", "TRANSFER_TIMEOUT", "FILETRANSFER_CONNECTION_FAILED",
+                    "FILETRANSFER_AUTH_EXPIRED", "PANEL_RESPONSE_FAILED", "WORKER_RESTARTED"}
+AUTO_FILE_DELAYS = (300, 900, 1800, 3600)
 
 
 def timestamp():
@@ -147,6 +151,10 @@ class DashboardManagement:
                     )
         self.inventory.import_history(self.catalog, self.tasks(), self.data.state_dir)
         with self.lock:
+            latest_files = {}
+            for task in self.tasks():
+                if task['kind'] == 'files': latest_files.setdefault(task['row'], task)
+            for task in latest_files.values(): self._queue_file_resume(task['id'])
             self._schedule()
 
     def task(self, task_id):
@@ -412,8 +420,14 @@ class DashboardManagement:
                 if server["binding_revision"] != task["revision"]:
                     raise BackupError("SERVER_CONFIG_CHANGED")
                 partial = task["kind"] == "files" and task["state"] == "FINISHED" and (task.get("result") or {}).get("status") == "PARTIAL"
-                if not partial and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
+                automatic_wait = task['state'] == 'SCHEDULED' and task.get('auto_resume_at')
+                if not partial and not automatic_wait and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
                     return task
+                if task.get('auto_resume_at'):
+                    self._update(task_id, scheduled_at=None, auto_resume_at=None)
+                first = task.get('first_started_at')
+                if first and time.time() - self._scheduled_timestamp(first) >= 86400:
+                    self._update(task_id, first_started_at=timestamp())
                 if not active:
                     control = TaskControl(lambda state: self._control_state(task_id, state))
                     self.controls[task_id] = control
@@ -428,6 +442,8 @@ class DashboardManagement:
             elif task["state"] not in ACTIVE:
                 return task
             else:
+                if task.get('auto_resume_at'):
+                    self._update(task_id, scheduled_at=None, auto_resume_at=None)
                 self._update(
                     task_id,
                     state=("PAUSING" if active else "PAUSED")
@@ -455,6 +471,14 @@ class DashboardManagement:
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
                 continue
+            if task.get('auto_resume_at'):
+                server = self.catalog.get(task['row'], include_deleted=True)
+                if server['blocked'] or server['deleted']:
+                    self._update(task['id'], state='PAUSED', auto_resume_at=None, scheduled_at=None)
+                    continue
+                if server['binding_revision'] != task['revision']:
+                    self._update(task['id'], state='FAILED', auto_resume_at=None, error_code='SERVER_CONFIG_CHANGED')
+                    continue
             limit = 1 if task["kind"] == "databases" else 5
             if sum(item["kind"] == task["kind"] for item in active) >= limit:
                 continue
@@ -471,6 +495,9 @@ class DashboardManagement:
             if due > time.time():
                 self._update(task["id"], state="SCHEDULED", next_at=iso_time(due))
                 next_wake.append(due)
+                continue
+            if task['kind'] == 'files' and task.get('first_started_at') and time.time() - self._scheduled_timestamp(task['first_started_at']) >= 86400:
+                self._update(task['id'], state='FAILED', error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
                 continue
             if self._uses_panel(task):
                 try:
@@ -492,7 +519,9 @@ class DashboardManagement:
             self.running.add(task["id"])
             active.append(task)
             self._update(
-                task["id"], state="RUNNING", started_at=timestamp(), next_at=None, error_code=None
+                task["id"], state="RUNNING", started_at=timestamp(),
+                first_started_at=task.get('first_started_at') or timestamp(),
+                auto_resume_at=None, next_at=None, error_code=None
             )
             self.executor.submit(self._run, task["id"])
         if any(x.get('schedule', {}).get('enabled') for server in self.catalog.all() if not server['deleted'] for x in self.inventory.list(server['row'], server['binding_revision'])):
@@ -722,7 +751,40 @@ class DashboardManagement:
                     task_id=task_id,
                 )
                 self.running.discard(task_id)
+                self._queue_file_resume(task_id)
                 self._schedule()
+
+    def _queue_file_resume(self, task_id):
+        task = self.task(task_id)
+        if self.closed or task['kind'] != 'files' or task['state'] not in {'FAILED','INTERRUPTED'} or task.get('error_code') not in AUTO_FILE_ERRORS:
+            return False
+        control = self.controls.get(task_id)
+        if control and (control.stopped or control.paused): return False
+        server = self.catalog.get(task['row'], include_deleted=True)
+        if server['blocked'] or server['deleted'] or server['binding_revision'] != task['revision']: return False
+        latest = next(t for t in self.tasks(task['row']) if t['kind']=='files')
+        if latest['id'] != task_id: return False
+        first = task.get('first_started_at') or task.get('started_at')
+        if not first: return False
+        if time.time() - self._scheduled_timestamp(first) >= 86400:
+            self._update(task_id, error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
+            return False
+        progress = dict(task.get('progress', {}))
+        saved = progress.get('received_bytes', 0)
+        previous_attempt = task.get('auto_resume_count', 0)
+        if saved > task.get('auto_resume_bytes', 0): previous_attempt = 0
+        attempt = previous_attempt + 1
+        due = min(time.time()+AUTO_FILE_DELAYS[min(attempt-1,len(AUTO_FILE_DELAYS)-1)], self._scheduled_timestamp(first)+86400)
+        scheduled = iso_time(due)
+        progress.update(active_files=[],active_transfers=0,current_file='',retry_at=None,retry_delay_seconds=0)
+        self._update(task_id, state='SCHEDULED', stage='AUTO_RESUME_WAIT', scheduled_at=scheduled,
+                     next_at=scheduled, auto_resume_at=scheduled, auto_resume_count=attempt,
+                     auto_resume_bytes=saved, auto_resume_error=task['error_code'], first_started_at=first,
+                     last_attempt_result=task.get('result'), result=None, error_code=None, progress=progress,
+                     ftp_connections=server['ftp_connections'], skip_unsupported_names=server['skip_unsupported_names'])
+        self.controls[task_id] = TaskControl(lambda state:self._control_state(task_id,state))
+        self.event(task['row'],'AUTO_RESUME_WAIT',kind='files',code=task['error_code'],task_id=task_id)
+        return True
 
     def progress(self, task_id, values):
         with self.lock:

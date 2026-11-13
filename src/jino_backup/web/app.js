@@ -106,6 +106,7 @@ const statuses = {
   INSPECTED: ["Список БД прочитан", ""],
 };
 const stages = {
+  AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
   FILE_VERIFY: "Проверка сохранённых файлов",
   RETRY_WAIT: "Ожидает переподключения",
   RETRY_EXHAUSTED: "Попытки восстановления исчерпаны",
@@ -655,6 +656,11 @@ function renderTable() {
     const tr = element("tr", server.row === state.selected ? "selected" : "");
     tr.dataset.serverRow = server.row;
     tr.setAttribute("aria-selected", String(server.row === state.selected));
+    tr.addEventListener('click', (event) => {
+      if (event.target.closest('button, a, input, select, textarea, label, summary')) return;
+      if (window.getSelection()?.toString()) return;
+      selectServer(server.row);
+    });
     const nameCell = element("td");
     const button = element("button", "server-name", server.name);
     button.dataset.row = server.row;
@@ -788,8 +794,6 @@ function selectServer(row, move = false) {
   state.selected = row;
   renderTable();
   renderDetail();
-  document.dispatchEvent(new CustomEvent("backup:select", { detail: { row } }));
-  if (window.location.hash.startsWith("#server/")) return;
   if (move && window.innerWidth <= 920) {
     $("detail").scrollIntoView({
       block: "start",

@@ -52,6 +52,20 @@ def main():
                 page.goto(f'http://127.0.0.1:{server.server_port}/', wait_until='networkidle')
                 page.locator('#auto-refresh').uncheck()
                 expect(page.locator('#activity-heading')).to_be_visible()
+                page.locator('tr[data-server-row="2"] td').nth(1).click()
+                expect(page.locator('#detail-name')).to_have_text('Сервер 02')
+                assert not page.evaluate('location.hash.startsWith("#server/")')
+                expect(page.locator('tr[data-server-row="2"]')).to_have_attribute('aria-selected','true')
+                page.locator('tr[data-server-row="3"] select').first.dispatch_event('click')
+                expect(page.locator('#detail-name')).to_have_text('Сервер 02')
+                page.locator('tr[data-server-row="3"] .server-name').click()
+                expect(page.locator('#detail-name')).to_have_text('Сервер 03')
+                assert not page.evaluate('location.hash.startsWith("#server/")')
+                page.locator('#open-server-card').click()
+                expect(page.locator('#server-card')).to_be_visible()
+                assert page.evaluate('location.hash==="#server/3"')
+                page.locator('[data-view="servers"]').click()
+                expect(page.locator('#server-view')).to_be_visible()
                 page.evaluate('''() => {
                     activity = new BackupActivity();
                     const now=Date.now();

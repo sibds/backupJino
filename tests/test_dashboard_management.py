@@ -351,7 +351,8 @@ def test_operator_skips_unsupported_names_and_logs_each_private_path(management,
     assert detail["server"]["configuration"]["skip_unsupported_names"] is True
 
 
-def test_failed_transfer_exposes_retry_history_partial_bytes_and_manual_resume(management, monkeypatch, tmp_path):
+@pytest.mark.parametrize('resume_mode',['manual','automatic'])
+def test_failed_transfer_preserves_parts_and_allows_early_manual_resume(management, monkeypatch, tmp_path, resume_mode):
     from test_backup import FixtureSource
     from jino_backup.dashboard_management import TaskControl
     remote = tmp_path / "remote"
@@ -369,15 +370,21 @@ def test_failed_transfer_exposes_retry_history_partial_bytes_and_manual_resume(m
     management.runner.download_factory = lambda *args: source
     monkeypatch.setattr(TaskControl, "wait", lambda self, delay, **kwargs: delays.append(delay))
     task = management.start(1, "files", {"transport": "ftps"})
-    wait_status(management, task["id"], "FAILED")
+    wait_status(management, task["id"], "SCHEDULED")
     failed = management.task(task["id"])
     assert failed["progress"]["received_bytes"] == 3
-    assert failed["stage"] == "RETRY_EXHAUSTED"
+    assert failed["stage"] == "AUTO_RESUME_WAIT"
     events = [item for item in management.events(1) if item["stage"] == "RETRY_WAIT"]
     assert len(events) == 7 and sorted(item["retry_attempt"] for item in events) == [1,1,1,2,3,4,5]
     assert delays == [2,2,2,4,8,16,32]
     broken = False
-    continued = management.start(1, "files", {"transport": "ftps"})
+    if resume_mode == 'manual':
+        continued = management.action(task['id'], 'resume')
+    else:
+        due=management._scheduled_timestamp(management.task(task['id'])['scheduled_at'])
+        monkeypatch.setattr('jino_backup.dashboard_management.time.time',lambda:due+1)
+        management._wake()
+        continued=management.task(task['id'])
     assert continued["id"] == task["id"] and continued.get("result") is None
     wait_status(management, task["id"], "FINISHED")
     assert offsets[-1] == 3
@@ -602,11 +609,11 @@ def test_new_ui_file_job_reuses_partial_legacy_checkpoint(management, monkeypatc
     assert management.task(task["id"])["result"]["files_bytes"] == len(b"synthetic-content")
 
 
-def test_restart_marks_tasks_interrupted_and_never_restarts_them_automatically(management):
+def test_restart_keeps_database_tasks_interrupted_for_manual_resume(management):
     from jino_backup.dashboard_management import DashboardManagement
 
     management.runner = lambda server, task, control, progress: {"status": "FILES_ONLY"}
-    task = management.start(1, "files", {})
+    task = management.start(1, "databases", {})
     wait_status(management, task["id"], "FINISHED")
     management._update(task["id"], state="RUNNING")
     management.close()

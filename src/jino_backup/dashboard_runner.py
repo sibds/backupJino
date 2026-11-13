@@ -4,6 +4,7 @@ import json
 import posixpath
 import sqlite3
 import time
+from datetime import datetime, timezone
 from contextlib import ExitStack
 
 from .account_batch import completed_database_copy
@@ -189,6 +190,8 @@ class OperatorRunner:
             control.checkpoint()
             progress(stage="AUTHENTICATE", retry_attempt=0, retry_limit=5, retry_at=None, retry_delay_seconds=0)
             if task["kind"] == "files" and task["transport"] in {"ftps", "sftp"}:
+                first = task.get('first_started_at') or task.get('started_at')
+                remaining = max(1, int(86400-(datetime.now(timezone.utc)-datetime.fromisoformat(first)).total_seconds())) if first else 86400
                 ftp = dict(credentials["ftp"], protocol=task["transport"])
                 plan = ServerPlan(
                     {"rows_total": 1, "servers_ready": 1, "needs_review": 0},
@@ -216,11 +219,13 @@ class OperatorRunner:
                     retry_wait=control.wait,
                     collector=ParallelCollector(
                         control, progress, self.budget,
+                        timeout_seconds=remaining,
                         connections=task.get("ftp_connections", server.get("ftp_connections", 3)),
                         metadata_factory=lambda values, site: source_for(values, site),
                         download_factory=self.download_factory,
                         skip_unsupported_names=skip_names,
                     ) if task["transport"] == "ftps" else None,
+                    timeout_seconds=remaining,
                 )
                 result = batch.run()["servers"][0]
                 self._file_totals(output, progress)
@@ -257,12 +262,15 @@ class OperatorRunner:
                         skip_unsupported_names=skip_names, continue_on_error=True,
                     )
 
+                first = task.get('first_started_at') or task.get('started_at')
+                remaining = max(1, int(86400-(datetime.now(timezone.utc)-datetime.fromisoformat(first)).total_seconds())) if first else 86400
                 result = PanelFileJob(
                     self.data.destination,
                     server["server_id"],
                     server["folder"],
                     workflow_key,
                     factory,
+                    timeout_seconds=remaining,
                     state_dir=self.data.state_dir,
                     skip_unsupported_names=skip_names,
                 ).run()
