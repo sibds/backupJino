@@ -37,7 +37,7 @@ def account_plan(path,mapping):
     return {'rows_total':len(rows),'accounts_ready':len(selected),'needs_review':len(issues),'issues':issues},selected
 
 
-def completed_database_copy(state_dir,destination,account_ref,folder,scope,key):
+def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*,allow_subset=False):
     directory=Path(state_dir)/'panel_jobs'
     cipher=Fernet(key)
     for path in directory.glob('*.enc'):
@@ -52,10 +52,14 @@ def completed_database_copy(state_dir,destination,account_ref,folder,scope,key):
                 continue
         state=json.loads(cipher.decrypt(path.read_bytes()))
         binding=state.get('scope',{})
-        if (state.get('phase')!='DB_ONLY' or binding.get('account_ref')!=account_ref
+        if ((not allow_subset and state.get('phase')!='DB_ONLY') or binding.get('account_ref')!=account_ref
                 or binding.get('snapshot_date')!=scope['snapshot_date'] or state.get('snapshot_ref')!=scope['snapshot_ref']):
             continue
         entries=state.get('databases',{})
+        if allow_subset:
+            entries = {alias:entry for alias,entry in entries.items() if entry.get('name') in set(scope['databases'])}
+            if any(not entry.get('artifact') or entry['artifact'].get('validation')!='PASS' for entry in entries.values()):
+                continue
         if {x.get('name') for x in entries.values()}!=set(scope['databases']):
             continue
         output=local_path(Path(destination),folder+'/'+path.stem)

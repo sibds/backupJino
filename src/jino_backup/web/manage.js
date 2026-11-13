@@ -10,12 +10,14 @@
   let pending = false;
   let jobFocus = null;
   let serverChoicesSignature = "";
+  const databaseDrafts = new Map();
   const labels = {
     SCHEDULED: "Запланировано",
     WAITING_RATE_LIMIT: "Ожидает часового интервала",
     WAITING_OPERATOR: "Ожидает оператора",
     QUEUE_UPDATED: "Изменён план работ",
     FILE_DOWNLOAD: "Передача файла",
+    FILE_VERIFY: "Проверка сохранённых файлов",
     FILE_ERROR: "Ошибка передачи файла",
     DIRECTORY_ERROR: "Не удалось прочитать каталог",
     SCANNING: "Чтение списка каталога",
@@ -59,6 +61,7 @@
     LOCAL_COMMIT_RECOVERED: "Восстановлена запись о сохранённом дампе",
     EXPORT_RESPONSE_UNKNOWN: "Проверяется результат отправленного экспорта",
     ALREADY_VERIFIED: "Проверены ранее сохранённые дампы",
+    INSPECTED: "Список БД прочитан",
   };
   window.backupTaskLabels = labels;
   const activeStates = [
@@ -364,6 +367,7 @@
   }
 
   function renderJobs() {
+    renderDatabaseCatalog();
     const server = detail?.server;
     if (!server) return;
     const focused = document.activeElement;
@@ -393,6 +397,7 @@
       const task = server.latest_tasks?.[kind];
       const target = $(kind + "-job");
       const fragment = document.createDocumentFragment();
+      if (kind === 'databases' && task?.inspect_only) fragment.append(node('p','helper','Только чтение списка БД из Jino. SQL не заказывается.'));
       const controls = node("div", "job-controls");
       const active = task && activeStates.includes(task.state);
       const start = () => {
@@ -972,6 +977,70 @@
       ftp_connections: Number($("ftp-connections").value),
       revision: detail.server.configuration.revision,
     });
+  });
+  function renderDatabaseCatalog() {
+    const target = $("database-catalog-list");
+    if (!target || !detail?.server || selected === 'new') return;
+    const server = detail.server;
+    const items = server.database_inventory || [];
+    const busy = (server.tasks || []).some(t => t.kind === 'databases' && activeStates.includes(t.state));
+    const disabled = pending || busy || server.blocked;
+    $("database-catalog-refresh").disabled = disabled;
+    const verified = items.filter(x => x.validation === 'PASS').length;
+    const expected = Math.max(items.length, ...(server.tasks || []).filter(t => t.kind === 'databases').map(t => t.progress?.expected_count || t.result?.snapshot_databases_count || 0));
+    text('database-catalog-summary', items.length ?
+      `Проверено ${verified} из ${expected}. Названий в справочнике: ${items.length}.` :
+      'Список ещё не получен. Обновите его из Jino или запустите выгрузку.');
+    const focused = target.contains(document.activeElement) ? document.activeElement.id : null;
+    const fragment = document.createDocumentFragment();
+    for (const item of items) {
+      const article = node('article', 'database-item');
+      const info = node('div', 'database-item-info');
+      const heading = node('div', 'database-item-heading');
+      heading.append(node('h4', '', item.name), node('span', 'badge ' + (item.validation === 'PASS' ? 'good' : ''), item.validation === 'PASS' ? 'Дамп проверен' : 'Нет проверенного дампа'));
+      const time = item.downloaded_at ? new Date(item.downloaded_at).toLocaleString('ru-RU') : 'Дата не зафиксирована';
+      info.append(heading,
+        node('p', 'helper', 'Снимок: ' + (item.snapshot_date || item.available_snapshot_date ? dateLabel(item.snapshot_date || item.available_snapshot_date) : '—') + ' · Выгружено: ' + time),
+        node('p', 'helper', item.size_bytes ? bytes(item.size_bytes) : 'Проверенные дампы сохраняются и при ошибке общего задания.'));
+      const key = selected + ':' + item.db_alias;
+      const schedule = item.schedule || {enabled:false,every_hours:24};
+      const draft = databaseDrafts.get(key) || {enabled:schedule.enabled,hours:schedule.every_hours};
+      const form = node('div', 'database-item-controls');
+      const checkbox = document.createElement('input');
+      checkbox.type='checkbox'; checkbox.checked=draft.enabled;
+      checkbox.id='db-enabled-'+item.db_alias;
+      const enabledLabel=node('label', 'database-enabled'); enabledLabel.append(checkbox,document.createTextNode('По расписанию'));
+      const hours=document.createElement('input');
+      hours.type='number'; hours.min='1'; hours.max='8760'; hours.step='1'; hours.value=draft.hours;
+      hours.id='db-hours-'+item.db_alias;
+      const hoursLabel=node('label','database-hours','Каждые, часов'); hoursLabel.append(hours);
+      const remember=()=>databaseDrafts.set(key,{enabled:checkbox.checked,hours:Number(hours.value)});
+      checkbox.addEventListener('change',remember); hours.addEventListener('input',remember);
+      const save=actionButton('Сохранить расписание',()=>{
+        if (!hours.reportValidity()) return;
+        command('/api/servers/'+selected+'/database-schedules',{
+          db_alias:item.db_alias,every_hours:Number(hours.value),enabled:checkbox.checked,
+        },()=>databaseDrafts.delete(key));
+      },pending || server.blocked);
+      save.id='db-save-'+item.db_alias;
+      const download=actionButton('Выгрузить эту БД',()=>{
+        const payload={kind:'databases',db_aliases:[item.db_alias],new_version:true};
+        if ($('db-snapshot-date').value) payload.snapshot_date=$('db-snapshot-date').value;
+        command('/api/servers/'+selected+'/jobs',payload);
+      },disabled);
+      const next = schedule.enabled && schedule.next_at ? 'Следующая постановка: '+new Date(schedule.next_at).toLocaleString('ru-RU') : 'Расписание выключено';
+      checkbox.disabled=hours.disabled=pending || server.blocked;
+      form.append(enabledLabel,hoursLabel,save,download,node('p','helper database-next',next));
+      article.append(info,form); fragment.append(article);
+    }
+    if (!items.length) fragment.append(node('p','empty-state','Пока нет подтверждённых названий БД. Чтение списка можно поставить в очередь кнопкой выше.'));
+    target.replaceChildren(fragment);
+    if (focused) document.getElementById(focused)?.focus({preventScroll:true});
+  }
+  $("database-catalog-refresh").addEventListener('click',()=>{
+    const payload={kind:'databases',inspect_only:true,new_version:true};
+    if ($('db-snapshot-date').value) payload.snapshot_date=$('db-snapshot-date').value;
+    command('/api/servers/'+selected+'/jobs',payload);
   });
   $("file-transport").addEventListener("change", renderJobs);
   $("card-copy-folder").addEventListener("click", async () => {

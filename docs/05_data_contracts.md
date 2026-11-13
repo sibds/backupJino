@@ -1,5 +1,9 @@
 # Модели данных и контракты интерфейсов
 
+## Дополнение 13 ноября: приватная карточка БД
+
+GET `/api/servers/{row}` дополнен `server.database_inventory[]`: `db_alias`, приватное `name`, необязательные `snapshot_date`, `available_snapshot_date`, `downloaded_at`, `size_bytes`, `validation`, `schedule`. Общий `/api/state` не содержит этот справочник. POST `/api/servers/{row}/jobs` для `kind=databases` принимает известные `db_aliases[]`, `inspect_only` и `new_version` (логические значения); без выбора сохраняется прежняя выгрузка всего снимка. Неизвестный псевдоним отклоняется. POST `/api/servers/{row}/database-schedules` принимает `db_alias`, `every_hours` (целое 1–8760), `enabled` (bool). Расписание хранит `next_at` UTC и ссылку на последнюю постановку. В задаче сохраняется безопасный `schedule_occurrence`. Манифест DB_ONLY выбранной работы описывает выбранный состав, не все БД аккаунта. [Семантика, безопасность и проверки](32_database_card_and_schedules.md).
+
 ## Реализованный локальный контракт 0.1
 
 Для явно выбранных обычных файлов добавлена команда `backup download-servers --file SOURCE --mapping MAP --destination PATH --batch-id KEY --remote-root ROOT [--dry-run | --execute --plaintext]`. По умолчанию она выполняет только локальный dry-run. Отчёт содержит общее число записей, число пригодных профилей и обезличенные ошибки; выполнение создаёт отдельные папки серверов и запусков, журнал продолжения и файловый манифест `FILES_ONLY`. Этот режим не заказывает дампы БД. [Команды и поведение при сбоях](../README.md), [живые результаты](10_download_and_panel_pilot.md).

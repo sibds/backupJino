@@ -72,6 +72,7 @@ ERROR_LABELS = {
     "CONNECTION_FAILED": "Не удалось подключиться",
     "PANEL_BROWSER_OR_LOGIN_FAILED": "Не удалось открыть панель хостинга",
     "PANEL_RESPONSE_FAILED": "Панель хостинга не ответила корректно",
+    "DATABASE_SCOPE_UNVERIFIED": "Выбранная БД отсутствует в подтверждённом списке. Обновите список из Jino",
     "UI_CHANGED": "Интерфейс хостинга изменился",
     "CONTAINER_AMBIGUOUS": "Не удалось однозначно выбрать хостинг",
     "TLS_CERTIFICATE_INVALID": "Сертификат соединения не прошёл проверку",
@@ -813,6 +814,10 @@ class DashboardData:
         server = next((item for item in snapshot["servers"] if item["row"] == row), None)
         if server is None:
             raise BackupError("SERVER_NOT_FOUND")
+        if self.management:
+            config = self.management.catalog.get(row)
+            server['database_inventory'] = self.management.inventory.list(row, config['binding_revision'])
+            server['databases']['verified_count'] = max(server['databases'].get('verified_count', 0), sum(x.get('validation') == 'PASS' for x in server['database_inventory']))
         events = list(self.server_events.get(row, []))
         if self.management:
             for event in self.management.events(row):
@@ -1226,7 +1231,7 @@ def make_server(data, *, port=8765):
                 return self.send_json({"error": "REQUEST_FORBIDDEN"}, 403)
             path = urlsplit(self.path).path
             server_route = re.fullmatch(
-                r"/api/servers/(\d+)(?:/(jobs|block|unblock|delete))?", path
+                r"/api/servers/(\d+)(?:/(jobs|database-schedules|block|unblock|delete))?", path
             )
             task_route = re.fullmatch(
                 r"/api/tasks/(operator-[a-f0-9]{24})/(pause|resume|stop|move|schedule|priority)",
@@ -1260,6 +1265,11 @@ def make_server(data, *, port=8765):
                         action = server_route[2]
                         if action == "jobs":
                             result = management.start(row, payload.get("kind"), payload)
+                        elif action == 'database-schedules':
+                            with management.lock:
+                                config = management.catalog.get(row)
+                                result = management.inventory.schedule(row, config['binding_revision'], payload)
+                                management._schedule()
                         elif action:
                             result = management.server_action(row, action)
                         else:

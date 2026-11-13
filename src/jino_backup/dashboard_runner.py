@@ -275,15 +275,28 @@ class OperatorRunner:
             progress(stage="DATABASES", snapshot_date=snapshot)
             key = Settings.load(self.data.state_dir).read_key()
             scope = panel.inspect(snapshot)
+            if not scope.get('binding_verified') or scope.get('snapshot_date') != snapshot:
+                raise BackupError('PROFILE_UNVERIFIED')
+            inventory = getattr(self.data, 'database_inventory', None)
+            if inventory:
+                inventory.discover(server['row'], server['binding_revision'], server['account_ref'], scope['databases'], snapshot=snapshot)
+            selected = task.get('db_aliases')
+            names = {identity('db', server['account_ref'], name):name for name in scope['databases']}
+            if selected is not None and not set(selected) <= names.keys():
+                raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+            selected_scope = dict(scope, databases=[name for alias,name in names.items() if selected is None or alias in selected])
+            if task.get('inspect_only'):
+                return {'status':'INSPECTED', 'snapshot_databases_count':len(names), 'source_snapshot_date':snapshot}
             control.checkpoint()
-            progress(expected_count=len(scope["databases"]), verified_count=0)
+            progress(expected_count=len(selected_scope["databases"]), verified_count=0)
             reused = completed_database_copy(
                 self.data.state_dir,
                 self.data.destination,
                 server["account_ref"],
                 server["folder"],
-                scope,
+                selected_scope,
                 key,
+                allow_subset=selected is not None,
             )
             if reused:
                 progress(
@@ -292,7 +305,7 @@ class OperatorRunner:
                 )
                 return reused
             workflow_key = task.get("workflow_key") or task["id"]
-            if not task.get("workflow_key") and self._legacy_binding(server):
+            if selected is None and not task.get("workflow_key") and self._legacy_binding(server):
                 previous_key = self.data.batch_id + "-" + snapshot
                 journal = (
                     self.data.state_dir
@@ -310,6 +323,9 @@ class OperatorRunner:
                 if event["stage"] == "SQL_VERIFIED":
                     verified += 1
                     received += event["size_bytes"]
+                    if inventory:
+                        inventory.verified(server['row'], server['binding_revision'], event['db_alias'],
+                                           snapshot, event['time'], event['size_bytes'])
                 progress(stage=event["stage"], verified_count=verified, received_bytes=received)
 
             panel.download_progress = lambda amount, total: progress(
@@ -332,6 +348,7 @@ class OperatorRunner:
                 server_folder=server["folder"],
                 notify=notify,
                 control=control.checkpoint,
+                selected_aliases=selected,
             ).run()
 
     @staticmethod

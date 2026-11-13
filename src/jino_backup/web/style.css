@@ -1866,6 +1866,24 @@ progress::-moz-progress-bar {
 }
 /* Servers surface only. Shared navigation, other views and all tables retain their styles. */
 .server-summary { display: contents; }
+.database-catalog { margin-top:28px; padding-top:22px; border-top:1px solid var(--line); }
+.database-catalog-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; margin-bottom:10px; }
+.database-catalog-heading h3 { margin:0 0 6px; }
+.database-catalog-list { margin-top:20px; }
+.database-item { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,390px); gap:24px; padding:20px 0; border-bottom:1px solid var(--line); }
+.database-item:last-child { border-bottom:0; }
+.database-item-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px; margin-bottom:8px; }
+.database-item h4 { font-size:14px; font-weight:600; margin:0; overflow-wrap:anywhere; }
+.database-item-info p { line-height:1.6; }
+.database-item-controls { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px 14px; align-items:end; }
+.database-enabled { display:flex; align-items:center; gap:8px; min-height:44px; font-size:12px; }
+.database-hours { display:grid; gap:5px; font-size:12px; color:var(--secondary); }
+.database-hours input { width:100%; min-width:0; min-height:40px; border:1px solid var(--line); border-radius:6px; padding:8px 10px; color:var(--text); background:var(--surface); }
+.database-next { grid-column:1/-1; font-variant-numeric:tabular-nums; }
+@media(max-width:800px) {
+  .database-catalog-heading { flex-wrap:wrap; }
+  .database-item { grid-template-columns:minmax(0,1fr); gap:14px; }
+}
 body:has(.nav-item[data-view="servers"][aria-current="page"]):has(#server-view:not([hidden])) .server-summary {
   display: grid;
   grid-template-columns: minmax(270px, .9fr) minmax(0, 1.4fr);

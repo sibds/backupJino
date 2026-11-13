@@ -96,6 +96,17 @@ class DashboardManagement:
     def __init__(self, data, runner=None, access_policy=None):
         self.data = data
         self.catalog = DashboardCatalog(data)
+        from .database_inventory import DatabaseInventory
+        from .state import Settings
+        try:
+            inventory_key = Settings.load(data.state_dir).read_key()
+        except BackupError as error:
+            if error.code != 'NOT_INITIALIZED':
+                raise
+            inventory_key = None
+        self.inventory = DatabaseInventory(data.state_dir / 'database-inventory.sqlite3', inventory_key)
+        data.database_inventory = self.inventory
+        self.scheduling_databases = False
         self.access_policy = access_policy or PanelAccessPolicy(data.state_dir)
         self.guard = FileLock(data.state_dir / "dashboard-management.lock")
         self.guard.__enter__()
@@ -134,6 +145,7 @@ class DashboardManagement:
                     self.controls[task_id] = TaskControl(
                         lambda state, identifier=task_id: self._control_state(identifier, state)
                     )
+        self.inventory.import_history(self.catalog, self.tasks(), self.data.state_dir)
         with self.lock:
             self._schedule()
 
@@ -192,7 +204,7 @@ class DashboardManagement:
             event["retry_at"] = details["retry_at"]
         if isinstance(details.get("directory"), str):
             event["directory"] = details["directory"][:2000]
-        if details.get("operation") in {"CWD", "PWD", "MLSD", "RETR"}:
+        if details.get("operation") in {"CWD", "PWD", "MLSD", "MLST", "RETR"}:
             event["operation"] = details["operation"]
         if type(details.get("ftp_reply_code")) is int and 100 <= details["ftp_reply_code"] <= 599:
             event["ftp_reply_code"] = details["ftp_reply_code"]
@@ -304,6 +316,15 @@ class DashboardManagement:
             elif not server["ftp_ready"]:
                 raise BackupError(server["ftp_issue"] or "FTP_CREDENTIAL_MISSING")
             snapshot = options.get("snapshot_date")
+            selected = options.get('db_aliases')
+            inspect_only = options.get('inspect_only', False)
+            if type(options.get('new_version', False)) is not bool or type(inspect_only) is not bool or kind != 'databases' and (selected is not None or inspect_only or options.get('new_version')):
+                raise BackupError('REQUEST_INVALID')
+            if selected is not None:
+                known = {x['db_alias'] for x in self.inventory.list(row, server['binding_revision'])}
+                if not isinstance(selected, list) or not selected or not all(isinstance(x, str) and x in known for x in selected):
+                    raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+                selected = sorted(set(selected))
             if snapshot is not None:
                 try:
                     if date.fromisoformat(snapshot).isoformat() != snapshot:
@@ -314,6 +335,8 @@ class DashboardManagement:
                 if task["kind"] != kind:
                     continue
                 if task["state"] in ACTIVE:
+                    if kind == 'databases' and (task.get('db_aliases') != selected or task.get('inspect_only', False) != inspect_only):
+                        raise BackupError('DOWNLOAD_BUSY')
                     return task
                 if (
                     (task["state"] in {"FAILED", "STOPPED", "INTERRUPTED"}
@@ -321,6 +344,9 @@ class DashboardManagement:
                     and task["revision"] == server["binding_revision"]
                     and task["transport"] == transport
                     and (snapshot is None or task.get("snapshot_date") == snapshot)
+                    and task.get('db_aliases') == selected
+                    and task.get('inspect_only', False) == inspect_only
+                    and not options.get('new_version', False)
                 ):
                     return self.action(task["id"], "resume")
                 break
@@ -345,6 +371,9 @@ class DashboardManagement:
                 "error_code": None,
                 "result": None,
                 "snapshot_date": snapshot,
+                "db_aliases": selected,
+                "inspect_only": inspect_only,
+                "schedule_occurrence": options.get('schedule_occurrence'),
                 "skip_unsupported_names": kind == "files" and server["skip_unsupported_names"],
                 "ftp_connections": server["ftp_connections"],
                 "scheduled_at": scheduled_at,
@@ -357,7 +386,8 @@ class DashboardManagement:
             self.event(row, "QUEUED", kind=kind, task_id=task_id)
             if priority == "critical":
                 self._move(task_id, "top")
-            self._schedule()
+            if not self.scheduling_databases:
+                self._schedule()
             return self.task(task_id)
 
     def _control_state(self, task_id, state):
@@ -418,6 +448,7 @@ class DashboardManagement:
         if self.timer:
             self.timer.cancel()
             self.timer = None
+        self._schedule_databases()
         all_tasks = self.tasks()
         active = [task for task in all_tasks if task["id"] in self.running]
         next_wake = []
@@ -464,11 +495,40 @@ class DashboardManagement:
                 task["id"], state="RUNNING", started_at=timestamp(), next_at=None, error_code=None
             )
             self.executor.submit(self._run, task["id"])
+        if any(x.get('schedule', {}).get('enabled') for server in self.catalog.all() if not server['deleted'] for x in self.inventory.list(server['row'], server['binding_revision'])):
+            next_wake.append(time.time()+60)
         if next_wake:
             delay = min(60, max(0.1, min(next_wake) - time.time()))
             self.timer = threading.Timer(delay, self._wake)
             self.timer.daemon = True
             self.timer.start()
+
+    def _schedule_databases(self):
+        if self.scheduling_databases:
+            return
+        self.scheduling_databases = True
+        try:
+            for server in self.catalog.all():
+                if server['blocked'] or server['deleted'] or not server['can_check']:
+                    continue
+                if any(t['kind']=='databases' and t['state'] in ACTIVE for t in self.tasks(server['row'])):
+                    continue
+                for item in self.inventory.list(server['row'], server['binding_revision']):
+                    schedule = item.get('schedule') or {}
+                    if schedule.get('enabled') and self._scheduled_timestamp(schedule['next_at']) <= time.time():
+                        occurrence = item['db_alias'] + ':' + schedule['next_at']
+                        existing = next((t for t in self.tasks(server['row']) if t.get('schedule_occurrence') == occurrence), None)
+                        try:
+                            task = existing or self.start(server['row'], 'databases', {'db_aliases':[item['db_alias']], 'new_version':True, 'schedule_occurrence':occurrence})
+                        except BackupError as error:
+                            if schedule.get('last_error') != error.code:
+                                self.event(server['row'], 'SCHEDULE_WAIT', kind='databases', code=error.code)
+                            self.inventory._update(server['row'], server['binding_revision'], item['db_alias'], schedule={**schedule, 'last_error':error.code})
+                            continue
+                        self.inventory.advance(server['row'], server['binding_revision'], item['db_alias'], schedule, task['id'])
+                        break
+        finally:
+            self.scheduling_databases = False
 
     def _wake(self):
         with self.lock:
@@ -621,13 +681,14 @@ class DashboardManagement:
             failed = result.get("status") in {"FAILED", "CANCELLED"}
             if result.get("error_code") == "CAPTCHA_REQUIRED":
                 self.access_policy.block(task["row"])
-            if task["kind"] == "databases" and result.get("status") == "DB_ONLY":
+            if task["kind"] == "databases" and result.get('artifacts'):
+                verified_artifacts = [x for x in result['artifacts'] if x.get('validation') == 'PASS']
                 self.progress(
                     task_id,
                     {
-                        "verified_count": result.get("databases_count", 0),
+                        "verified_count": len(verified_artifacts),
                         "received_bytes": sum(
-                            item["size_bytes"] for item in result.get("artifacts", [])
+                            item["size_bytes"] for item in verified_artifacts
                         ),
                     },
                 )
@@ -668,6 +729,9 @@ class DashboardManagement:
             task = self.task(task_id)
             progress = dict(task["progress"])
             for key in (
+                'metadata_mlst_checks',
+                'metadata_listing_checks',
+                'processed_files',
                 "received_bytes",
                 "planned_bytes",
                 "planned_files",

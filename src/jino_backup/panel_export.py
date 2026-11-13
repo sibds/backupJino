@@ -37,7 +37,7 @@ def atomic_bytes(path, value):
 class PanelExportJob:
     def __init__(self, state_dir, destination, account_ref, idempotency_key,
                  snapshot_date, key, panel_factory, *, timeout_seconds=300,
-                 max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None):
+                 max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None):
         try:
             if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
                 raise ValueError
@@ -53,6 +53,7 @@ class PanelExportJob:
         self.destination=Path(destination).absolute()
         self.server_id=account_ref.replace('panel-','server-',1)
         self.server_folder=server_folder
+        self.selected_aliases = sorted(selected_aliases) if selected_aliases is not None else None
         self.legacy_output=local_path(self.destination,self.server_id+'/'+self.job_id)
         self.output=local_path(self.destination,(server_folder or self.server_id)+'/'+self.job_id)
         self.account_ref, self.snapshot_date = account_ref, snapshot_date
@@ -81,6 +82,8 @@ class PanelExportJob:
 
     def _load(self):
         scope = {'account_ref':self.account_ref,'snapshot_date':self.snapshot_date,'output':str(self.output)}
+        if self.selected_aliases is not None:
+            scope['selected_db_aliases'] = self.selected_aliases
         if self.private_path.exists():
             try:
                 self.state = json.loads(self.cipher.decrypt(self.private_path.read_bytes()))
@@ -163,6 +166,12 @@ class PanelExportJob:
                     names = scope.get('databases')
                     if not isinstance(names,list) or not names or not all(isinstance(n,str) and n for n in names) or len(set(names)) != len(names):
                         raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+                    if self.selected_aliases is not None:
+                        selected = set(self.selected_aliases)
+                        available = {identity('db', self.account_ref, name):name for name in names}
+                        if not selected or not selected <= available.keys():
+                            raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+                        names = [name for alias,name in available.items() if alias in selected]
                     if self.state['snapshot_ref'] and self.state['snapshot_ref'] != scope['snapshot_ref']:
                         raise BackupError('SNAPSHOT_MISMATCH')
                     self.state['snapshot_ref'] = scope['snapshot_ref']

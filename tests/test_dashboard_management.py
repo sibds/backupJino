@@ -8,6 +8,75 @@ from jino_backup.errors import BackupError
 from jino_backup.state import Settings
 
 
+def test_database_interval_enqueues_one_selected_job_without_duplicate_ticks(management):
+    management.inventory.discover(1, 1, management.catalog.get(1)['account_ref'], ['scheduled_synthetic_db'])
+    alias = management.inventory.list(1, 1)[0]['db_alias']
+    management.inventory.schedule(1, 1, {'db_alias':alias,'every_hours':24,'enabled':True})
+    assert not management.tasks()
+    management.inventory._update(1, 1, alias, schedule={'enabled':True,'every_hours':24,'next_at':'2020-01-01T00:00:00Z'})
+    entered, release = threading.Event(), threading.Event()
+    received = []
+    def runner(server, task, control, progress):
+        received.append(task['db_aliases'])
+        entered.set()
+        release.wait(2)
+        return {'status':'DB_ONLY','databases_count':1,'artifacts':[]}
+    management.runner = runner
+    try:
+        with management.lock:
+            management._schedule()
+        assert entered.wait(2)
+        with management.lock:
+            management._schedule()
+        assert len(management.tasks()) == 1 and received == [[alias]]
+        assert b'scheduled_synthetic_db' not in management.catalog.path.read_bytes()
+    finally:
+        release.set()
+
+
+def test_database_inspection_reads_jino_names_without_exporting(management, monkeypatch):
+    from test_panel_export import PanelFixture
+    class Panel(PanelFixture):
+        def inspect_files(self, prepare_transport=True): return {}
+        def latest_mysql_snapshot(self): return '2026-11-10'
+    panel = Panel()
+    monkeypatch.setattr('jino_backup.dashboard_runner.JinoPanelBrowser', lambda credentials: panel)
+    task = management.start(1, 'databases', {'inspect_only':True})
+    wait_status(management, task['id'], 'FINISHED')
+    assert management.task(task['id'])['result']['status'] == 'INSPECTED'
+    assert len(management.inventory.list(1, 1)) == 2
+    assert not panel.exports and not panel.deleted
+
+
+def test_database_inventory_is_only_exposed_in_server_detail(management):
+    management.data.management = management
+    management.inventory.discover(1, 1, management.catalog.get(1)['account_ref'], ['private_synthetic_db'])
+    assert 'private_synthetic_db' not in json.dumps(management.data.snapshot())
+    assert management.data.server_detail(1)['server']['database_inventory'][0]['name'] == 'private_synthetic_db'
+
+
+def test_database_interval_does_not_duplicate_a_persisted_occurrence(management):
+    management.inventory.discover(1, 1, management.catalog.get(1)['account_ref'], ['scheduled_db'])
+    alias = management.inventory.list(1, 1)[0]['db_alias']
+    due = '2020-01-01T00:00:00Z'
+    task = management.start(1,'databases',{'db_aliases':[alias], 'scheduled_at':'2099-01-01T00:00:00Z', 'schedule_occurrence':alias+':'+due})
+    management._update(task['id'],state='FAILED')
+    management.inventory._update(1,1,alias,schedule={'enabled':True,'every_hours':24,'next_at':due})
+    with management.lock:
+        management._schedule()
+    assert len(management.tasks()) == 1
+    assert management.inventory.list(1,1)[0]['schedule']['last_task_id'] == task['id']
+
+
+def test_selected_database_cannot_replace_an_active_full_export(management):
+    management.inventory.discover(1,1,management.catalog.get(1)['account_ref'],['known_db'])
+    alias=management.inventory.list(1,1)[0]['db_alias']
+    existing=management.start(1,'databases',{'scheduled_at':'2099-01-01T00:00:00Z'})
+    with pytest.raises(BackupError,match='DOWNLOAD_BUSY'):
+        management.start(1,'databases',{'db_aliases':[alias]})
+    assert len(management.tasks()) == 1 and management.task(existing['id'])['db_aliases'] is None
+
+
 @pytest.fixture
 def management(tmp_path):
     from jino_backup.dashboard import DashboardData
@@ -722,6 +791,10 @@ def test_http_server_crud_and_task_controls_are_available_on_normal_routes(manag
 
     try:
         assert request("/api/servers/1")["server"]["name"] == "Тестовый сервер"
+        management.inventory.discover(1, 1, management.catalog.get(1)['account_ref'], ['http_synthetic_db'])
+        alias = management.inventory.list(1,1)[0]['db_alias']
+        assert request('/api/servers/1/database-schedules', {'db_alias':alias,'every_hours':24,'enabled':True})['ok']
+        assert request('/api/servers/1')['server']['database_inventory'][0]['schedule']['enabled']
         started = request("/api/servers/1/jobs", {"kind": "files"})
         wait_status(management, started["id"], "FINISHED")
         assert request("/api/servers/1")["events"]

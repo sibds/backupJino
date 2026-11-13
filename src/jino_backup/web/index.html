@@ -199,7 +199,7 @@
                 <div class="activity-axis"><span>Последние 30 минут</span><span>Сейчас · неполная минута</span></div></figure>
             </div>
             <details class="activity-method"><summary>Как считаются скорость и история</summary>
-              <p class="helper">Скорость — по подтверждённым байтам за последние 30 секунд, не сетевой трафик. МБ = 1 000 000 байт. История записывается, пока панель открыта, и хранится в этом браузере до часа. Разрывы наблюдения — без данных.</p>
+              <p class="helper">Скорость — по подтверждённым байтам за последние 30 секунд, не сетевой трафик. Повторные проверки готовых файлов учитываются в графике файлов, без добавления загруженных байтов. МБ = 1 000 000 байт. История записывается, пока панель открыта, и хранится в этом браузере до часа. Разрывы наблюдения — без данных.</p>
             </details>
             <details class="activity-history"><summary>Поминутные значения</summary>
               <div class="activity-history-scroll"><table><thead><tr><th>Минута</th><th>Загружено, МБ</th><th>Файлов проверено</th></tr></thead><tbody id="activity-history-rows"></tbody></table></div>
@@ -613,6 +613,14 @@
               >
             </div>
             <div id="databases-job" class="job-area"></div>
+            <section class="database-catalog" aria-labelledby="database-catalog-heading">
+              <div class="database-catalog-heading"><div>
+                <h3 id="database-catalog-heading">Базы данных и расписание</h3>
+                <p id="database-catalog-summary" class="helper">Сведения из локального журнала и панели Jino.</p>
+              </div><button id="database-catalog-refresh" class="button secondary">Обновить список из Jino</button></div>
+              <p class="helper">Обновление списка не заказывает SQL. Выгрузка использует существующий снимок Jino, новый снимок не создаётся. Расписание работает, пока запущена панель; входы подчиняются общему часовому допуску. Пропущенные интервалы объединяются в один запуск.</p>
+              <div id="database-catalog-list" class="database-catalog-list"></div>
+            </section>
           </section>
           <section data-card-panel="logs" hidden>
             <div class="job-heading">
