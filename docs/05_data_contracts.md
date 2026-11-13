@@ -1,5 +1,7 @@
 # Модели данных и контракты интерфейсов
 
+Файловые задания управляемой очереди поддерживают этап AUTO_RESUME_WAIT в состоянии SCHEDULED и поля auto_resume_at, auto_resume_count, auto_resume_error, auto_resume_bytes, first_started_at, last_attempt_result. Идентификатор, ключ копии и checkpoint не меняются. scheduled_at указывает ближайший запуск, ручная пауза/остановка его отменяет. Автопродолжение не меняет контракт manifest.json и не применяется к БД. [Поведение и пределы](34_automatic_file_resume.md).
+
 ## Дополнение 13 ноября: приватная карточка БД
 
 GET `/api/servers/{row}` дополнен `server.database_inventory[]`: `db_alias`, приватное `name`, необязательные `snapshot_date`, `available_snapshot_date`, `downloaded_at`, `size_bytes`, `validation`, `schedule`. Общий `/api/state` не содержит этот справочник. POST `/api/servers/{row}/jobs` для `kind=databases` принимает известные `db_aliases[]`, `inspect_only` и `new_version` (логические значения); без выбора сохраняется прежняя выгрузка всего снимка. Неизвестный псевдоним отклоняется. POST `/api/servers/{row}/database-schedules` принимает `db_alias`, `every_hours` (целое 1–8760), `enabled` (bool). Расписание хранит `next_at` UTC и ссылку на последнюю постановку. В задаче сохраняется безопасный `schedule_occurrence`. Манифест DB_ONLY выбранной работы описывает выбранный состав, не все БД аккаунта. [Семантика, безопасность и проверки](32_database_card_and_schedules.md).
