@@ -327,13 +327,31 @@ function toast(message) {
 }
 function displayDiagnostics(server, { table = false } = {}) {
   const task = server.latest_tasks?.files;
+  const started = (value) => !!(value?.started_at || value?.first_started_at);
+  const diagnostics = server.diagnostics || [];
+  // Managed diagnostics are appended after the saved results by the API.
+  // Match the last occurrence so an identical new failure stays visible.
+  const current = new Set();
+  for (const [kind, value] of Object.entries(server.latest_tasks || {})) {
+    if (!value.error_code) continue;
+    const source = kind === "files" ? "Файлы" : "Базы данных";
+    const index = diagnostics.findLastIndex((item) => item.source === source && item.code === value.error_code);
+    if (index >= 0) current.add(index);
+  }
+  const superseded = (item, index) => {
+    if (current.has(index)) return false;
+    if (["FTP", "Файлы HTTPS", "Файлы"].includes(item.source)) return started(task);
+    if (["Базы данных", "Панель"].includes(item.source)) return started(server.latest_tasks?.databases);
+    return false;
+  };
   const newerFtpsResult =
     task?.transport === "ftps" &&
     (task.error_code ||
       task.progress?.directories_seen > 0 ||
       task.progress?.verified_files > 0 ||
       task.progress?.inventory_complete);
-  return (server.diagnostics || [])
+  return diagnostics
+    .filter((item, index) => !superseded(item, index))
     .filter((item) => !(table && (item.source === "Файлы HTTPS" || item.source === "FTP" && newerFtpsResult)))
     .map((item) =>
       item.source === "FTP"
@@ -356,6 +374,13 @@ function displayDiagnostics(server, { table = false } = {}) {
         : item
     )
     .sort((a, b) => Number(!!a.historical) - Number(!!b.historical));
+}
+function currentServerError(server) {
+  const error = server.error_message;
+  if (!error) return null;
+  const represented = (server.diagnostics || []).some((item) => item.message === error);
+  return represented && !displayDiagnostics(server, {table:true}).some((item) => item.message === error)
+    ? null : error;
 }
 function visibleServers() {
   if (!state.data) return [];
@@ -889,7 +914,7 @@ function renderDetail() {
   if ($("folder-path").value !== server.folder_path)
     $("folder-path").value = server.folder_path;
   const error =
-    server.error_message ||
+    currentServerError(server) ||
     (!server.can_check ? server.availability.message : null);
   $("detail-error").hidden = !error;
   text("detail-error", error || "");

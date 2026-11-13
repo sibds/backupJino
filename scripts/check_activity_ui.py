@@ -66,6 +66,32 @@ def main():
                 assert page.evaluate('location.hash==="#server/3"')
                 page.locator('[data-view="servers"]').click()
                 expect(page.locator('#server-view')).to_be_visible()
+                page.locator('tr[data-server-row="2"] .server-name').click()
+                page.evaluate('''() => {
+                    window.diagnosticOriginal = structuredClone(state.data.servers.find(s=>s.row===2));
+                    const s=state.data.servers.find(s=>s.row===2);
+                    s.diagnostics=[{source:'Базы данных',code:'UI_CHANGED',message:'Старая ошибка'}];
+                    s.error_message='Старая ошибка';
+                    s.latest_tasks.databases={state:'RUNNING',started_at:new Date().toISOString()};
+                    renderTable(); renderDetail();
+                }''')
+                expect(page.locator('tr[data-server-row="2"]')).not_to_contain_text('UI_CHANGED')
+                expect(page.locator('#detail-error')).to_be_hidden()
+                page.evaluate('''() => {
+                    const s=state.data.servers.find(s=>s.row===2);
+                    s.diagnostics.push({source:'Базы данных',code:'UI_CHANGED',message:'Новая ошибка'});
+                    s.error_message='Новая ошибка';
+                    s.latest_tasks.databases.error_code='UI_CHANGED';
+                    renderTable(); renderDetail();
+                }''')
+                expect(page.locator('tr[data-server-row="2"]')).to_contain_text('Новая ошибка')
+                expect(page.locator('#detail-error')).to_have_text('Новая ошибка')
+                page.evaluate('''() => {
+                    const index=state.data.servers.findIndex(s=>s.row===2);
+                    state.data.servers[index]=window.diagnosticOriginal;
+                    delete window.diagnosticOriginal;
+                    renderTable(); renderDetail();
+                }''')
                 page.evaluate('''() => {
                     activity = new BackupActivity();
                     const now=Date.now();
