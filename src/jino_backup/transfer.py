@@ -322,6 +322,11 @@ class SftpSource:
     def _entry(name, info):
         mode = info.st_mode or 0
         kind = "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "unsafe"
+        for check, special in ((stat.S_ISLNK, 'symlink'), (stat.S_ISFIFO, 'fifo'),
+                               (stat.S_ISSOCK, 'socket'), (stat.S_ISCHR, 'chr'), (stat.S_ISBLK, 'blk')):
+            if check(mode):
+                kind = special
+                break
         return Entry(name, kind, info.st_size or 0, str(info.st_mtime))
 
     def listdir(self, relative):
@@ -366,8 +371,20 @@ class BoundedWriter:
         return self.stream.write(data)
 
 
+def unsupported_type(kind):
+    """Recognize explicit special types without exposing an MLSD link target."""
+    value = kind.lower()
+    if value.startswith('os.unix='):
+        value = value[len('os.unix='):]
+    if value.startswith('slink:'):
+        value = 'slink'
+    return {'slink': 'SYMLINK', 'link': 'SYMLINK', 'symlink': 'SYMLINK',
+            'fifo': 'FIFO', 'socket': 'SOCKET', 'chr': 'CHAR_DEVICE',
+            'blk': 'BLOCK_DEVICE'}.get(value)
+
+
 def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds, checkpoint=None,continue_on_error=False,
-                  skip_unsupported_names=False):
+                  skip_unsupported_names=False, skip_unsupported_types=False):
     destination = Path(destination)
     private_dir(destination)
     deadline = time.monotonic() + timeout_seconds
@@ -400,8 +417,15 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
             if len(seen) > max_files:
                 raise BackupError("TRANSFER_LIMIT_EXCEEDED")
             if issue:
-                omission = {'path':display_remote_path(relative), 'kind':entry.kind, 'reason':issue,
+                omission = {'path':display_remote_path(relative), 'kind':entry.kind if entry.kind in {'file', 'dir'} else 'special', 'reason':issue,
                             'error_code':'REMOTE_NAME_UNSUPPORTED'}
+                skipped.append(omission)
+                errors.append(dict(omission))
+                continue
+            special = unsupported_type(entry.kind)
+            if skip_unsupported_types and special:
+                omission = {'path':display_remote_path(relative), 'kind':'special',
+                            'reason':special, 'error_code':'REMOTE_TYPE_UNSUPPORTED'}
                 skipped.append(omission)
                 errors.append(dict(omission))
                 continue

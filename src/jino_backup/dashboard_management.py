@@ -226,9 +226,9 @@ class DashboardManagement:
         if stage == "FILE_SKIPPED":
             if isinstance(details.get("skipped_path"), str):
                 event["file"] = details["skipped_path"][:2000]
-            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME", "INVALID_UTF8_NAME"}:
+            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME", "INVALID_UTF8_NAME", "SYMLINK", "FIFO", "SOCKET", "CHAR_DEVICE", "BLOCK_DEVICE"}:
                 event["skip_reason"] = details["skip_reason"]
-            if details.get("skipped_kind") in {"file", "dir"}:
+            if details.get("skipped_kind") in {"file", "dir", "special"}:
                 event["skipped_kind"] = details["skipped_kind"]
         with self.catalog.connection() as db:
             db.execute("INSERT INTO events(row_id,payload) VALUES (?,?)", (row, json.dumps(event)))

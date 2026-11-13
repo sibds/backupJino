@@ -16,7 +16,7 @@ from .panel import JinoPanelBrowser
 from .panel_downloads import PanelFileJob, PanelFileSource
 from .panel_export import PanelExportJob
 from .state import Settings
-from .transfer import relative_path, name_compatibility_issue, source_for, display_remote_path
+from .transfer import relative_path, name_compatibility_issue, source_for, display_remote_path, unsupported_type
 from .retry import RecoveringSource
 from .parallel import ParallelCollector, ConnectionBudget
 from .curl_transfer import CurlFileSource
@@ -38,12 +38,13 @@ class ControlledWriter:
 
 class ControlledSource:
     def __init__(self, source, control, progress, output, *, skip_unsupported_names=False,
-                 continue_on_error=False):
+                 skip_unsupported_types=False, continue_on_error=False):
         self.source, self.control, self.progress, self.output = source, control, progress, output
         self.inventory = {}
         self.received_bytes = 0
         self.last_notice = 0
         self.skip_unsupported_names = skip_unsupported_names
+        self.skip_unsupported_types = skip_unsupported_types
         self.continue_on_error = continue_on_error
         self.inventory_errors = {}
 
@@ -98,9 +99,16 @@ class ControlledSource:
                         skipped_count += 1
                         self.progress(stage="FILE_SKIPPED", log=True, error_code="REMOTE_NAME_UNSUPPORTED",
                                       skipped_count=skipped_count, skipped_path=display_remote_path(path),
-                                      skip_reason=issue, skipped_kind=entry.kind)
+                                      skip_reason=issue, skipped_kind=entry.kind if entry.kind in {'file', 'dir'} else 'special')
                         continue
                     relative_path(path)
+                    special = unsupported_type(entry.kind)
+                    if self.skip_unsupported_types and special:
+                        skipped_count += 1
+                        self.progress(stage="FILE_SKIPPED", log=True, error_code="REMOTE_TYPE_UNSUPPORTED",
+                                      skipped_count=skipped_count, skipped_path=display_remote_path(path),
+                                      skip_reason=special, skipped_kind="special")
+                        continue
                     if entry.kind == "dir":
                         queue.append((path, depth + 1))
                     elif entry.kind == "file":
@@ -203,7 +211,8 @@ class OperatorRunner:
 
                 def factory(values, site):
                     return ControlledSource(RecoveringSource(source_for(values, site), wait=control.wait, notify=progress), control, progress, output,
-                                            skip_unsupported_names=skip_names, continue_on_error=True)
+                                            skip_unsupported_names=skip_names, skip_unsupported_types=True,
+                                            continue_on_error=True)
 
                 batch = DownloadBatch(
                     plan,
@@ -216,6 +225,7 @@ class OperatorRunner:
                     if task["transport"] != "ftps" else None,
                     continue_on_error=True,
                     skip_unsupported_names=skip_names,
+                    skip_unsupported_types=True,
                     retry_wait=control.wait,
                     collector=ParallelCollector(
                         control, progress, self.budget,
@@ -224,6 +234,7 @@ class OperatorRunner:
                         metadata_factory=lambda values, site: source_for(values, site),
                         download_factory=self.download_factory,
                         skip_unsupported_names=skip_names,
+                        skip_unsupported_types=True,
                     ) if task["transport"] == "ftps" else None,
                     timeout_seconds=remaining,
                 )

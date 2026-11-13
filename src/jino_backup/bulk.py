@@ -76,11 +76,12 @@ class DownloadBatch:
     def __init__(self, plan, destination, batch_id, remote_root, source_factory=source_for,
                  *, notify=None, max_bytes=1024**4, max_files=1000000,
                  timeout_seconds=86400, known_hosts=None, continue_on_error=False,
-                 skip_unsupported_names=False, retry_wait=None, collector=None):
+                 skip_unsupported_names=False, skip_unsupported_types=False, retry_wait=None, collector=None):
         if not isinstance(batch_id, str) or not 1 <= len(batch_id) <= 160:
             raise BackupError('IDEMPOTENCY_KEY_INVALID')
         self.plan, self.destination = plan, Path(destination).absolute()
         self.skip_unsupported_names = skip_unsupported_names
+        self.skip_unsupported_types = skip_unsupported_types
         self.retry_wait = retry_wait
         self.collector = collector
         self.batch_id, self.run_id = batch_id, identity('download', batch_id)
@@ -136,13 +137,15 @@ class DownloadBatch:
                     captured = collect_files(source, snapshot / 'files', max_bytes=self.max_bytes,
                                              max_files=self.max_files, timeout_seconds=self.timeout_seconds,
                                              checkpoint=progress, continue_on_error=self.continue_on_error,
-                                             skip_unsupported_names=self.skip_unsupported_names)
+                                             skip_unsupported_names=self.skip_unsupported_names,
+                                             skip_unsupported_types=self.skip_unsupported_types)
             manifest = {'schema_version':'1.0', 'job_id':self.run_id, 'site_id':server.server_id,
                         'scope':scope, 'status':'PARTIAL' if captured.get('errors') else 'FILES_ONLY', 'capture_method':server.credentials['protocol'],
                         'capture_started_at':started, 'capture_finished_at':datetime.now(timezone.utc).isoformat(),
                         'source_snapshot_at':None, 'capture_consistency':'BEST_EFFORT',
                         'files':captured, 'databases':[], 'encrypted':False,
                         'skip_unsupported_names':self.skip_unsupported_names,
+                        'skip_unsupported_types':self.skip_unsupported_types,
                         'warnings':['DB_NOT_EXPORTED', 'LIVE_FILES_BEST_EFFORT']}
             write_json(manifest_path, manifest)
             return {'status':manifest['status'], 'files_count':captured['count'], 'files_bytes':captured['bytes'],

@@ -13,7 +13,7 @@ from .errors import BackupError
 from .retry import retry_call, TRANSIENT_ERRORS
 from .state import private_dir
 from .storage import sha256_file
-from .transfer import name_compatibility_issue, relative_path, source_for, display_remote_path
+from .transfer import name_compatibility_issue, relative_path, source_for, display_remote_path, unsupported_type
 
 
 class ConnectionBudget:
@@ -116,13 +116,14 @@ class MetadataSession:
 class ParallelCollector:
     def __init__(self, control, progress, budget, *, connections=3,
                  metadata_factory=source_for, download_factory=CurlFileSource,
-                 skip_unsupported_names=False, continue_on_error=True,
+                 skip_unsupported_names=False, skip_unsupported_types=False, continue_on_error=True,
                  max_bytes=1024**4, max_files=1000000, timeout_seconds=86400, wait=None):
         if type(connections) is not int or not 2 <= connections <= 5:
             raise BackupError("CONNECTION_LIMIT_INVALID")
         self.base_control, self.progress, self.budget = control, progress, budget
         self.connections, self.metadata_factory, self.download_factory = connections, metadata_factory, download_factory
         self.skip_names, self.continue_on_error = skip_unsupported_names, continue_on_error
+        self.skip_types = skip_unsupported_types
         self.max_bytes, self.max_files, self.timeout, self.wait = max_bytes, max_files, timeout_seconds, wait
 
     def collect(self, credentials, site, snapshot, checkpoint):
@@ -274,14 +275,24 @@ class ParallelCollector:
                     if not self.skip_names:
                         raise BackupError("REMOTE_PATH_UNSAFE")
                     display_path = display_remote_path(path)
-                    omission = {"path": display_path, "kind": entry.kind, "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
+                    omission = {"path": display_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
                     self.skipped.append(omission)
                     self.errors.append(dict(omission))
                     self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
-                              skipped_path=display_path, skipped_kind=entry.kind, skip_reason=issue,
+                              skipped_path=display_path, skipped_kind=omission['kind'], skip_reason=issue,
                               error_code="REMOTE_NAME_UNSUPPORTED")
                     continue
                 relative_path(path)
+                special = unsupported_type(entry.kind)
+                if self.skip_types and special:
+                    omission = {"path": display_remote_path(path), "kind": "special",
+                                "reason": special, "error_code": "REMOTE_TYPE_UNSUPPORTED"}
+                    self.skipped.append(omission)
+                    self.errors.append(dict(omission))
+                    self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
+                              skipped_path=omission['path'], skipped_kind="special",
+                              skip_reason=special, error_code="REMOTE_TYPE_UNSUPPORTED")
+                    continue
                 if entry.kind == "dir":
                     private_dir(local_path(self.snapshot, "files/" + path))
                     self.directories.append(path)
