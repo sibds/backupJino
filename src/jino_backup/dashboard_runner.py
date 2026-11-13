@@ -189,6 +189,8 @@ class OperatorRunner:
         independent_files = task["kind"] == "files" and task["transport"] in {"ftps", "sftp"}
         lock_suffix = "-files.lock" if independent_files else ".lock"
         with ExitStack() as stack:
+            if task['kind'] == 'files' and task['transport'] != 'ftps':
+                stack.enter_context(self.budget.lease(control))
             stack.enter_context(
                 FileLock(
                     self.data.state_dir / "account_batches" / (server["account_ref"] + lock_suffix)

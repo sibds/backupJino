@@ -33,8 +33,9 @@ def test_slow_saved_checks_do_not_block_later_downloads(tmp_path, monkeypatch):
     if hasattr(checkpoint, 'verify_done'):
         original_verify = checkpoint.verify_done
         def gated_verify(relative, *args, **kwargs):
-            checks.append(relative)
-            assert downloaded.wait(3), 'Local verification blocked new transfer'
+            if relative.startswith('old'):
+                checks.append(relative)
+                assert downloaded.wait(3), 'Local verification blocked new transfer'
             return original_verify(relative, *args, **kwargs)
         monkeypatch.setattr(checkpoint, 'verify_done', gated_verify)
     def downloader(*args):
@@ -87,10 +88,10 @@ def test_saved_checks_use_no_download_sessions_and_are_cancellable(tmp_path, mon
     assert run(no_session)['count'] == 1
     entered, release = threading.Event(), threading.Event()
     original = DirectoryCheckpoint.verify_done
-    def verify(self, relative, entry, task_control):
+    def verify(self, relative, entry, task_control, **kwargs):
         entered.set()
         assert release.wait(3)
-        return original(self, relative, entry, task_control)
+        return original(self, relative, entry, task_control, **kwargs)
     monkeypatch.setattr(DirectoryCheckpoint, 'verify_done', verify)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(run, no_session)

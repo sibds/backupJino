@@ -238,7 +238,7 @@ def test_file_and_db_jobs_share_server_only_with_independent_transport(managemen
 @pytest.mark.parametrize("connections", [2, 3, 5])
 def test_database_has_reserved_capacity_when_ftps_budget_is_reserved(management, connections):
     rows = [1]
-    capacity = 10 // connections
+    capacity = 5
     management.save_server(1, {"ftp_connections": connections})
     for index in range(2, capacity + 2):
         rows.append(management.catalog.save(None, {

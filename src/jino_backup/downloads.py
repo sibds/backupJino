@@ -167,7 +167,6 @@ class DirectoryCheckpoint:
             stream.seek(offset)
             writer = CheckpointWriter(stream, digest, offset, entry.size, deadline,
                                       lambda size, checksum: self.record(relative, entry, 'partial', size, checksum))
-            writer.commit()
             try:
                 if source.stat(relative) != entry:
                     raise BackupError('SOURCE_CHANGED')
@@ -180,13 +179,13 @@ class DirectoryCheckpoint:
         os.replace(partial, local)
         self.record(relative, entry, 'done', entry.size, digest.hexdigest())
 
-    def verify_done(self, relative, entry, control):
+    def verify_done(self, relative, entry, control, *, require_modified=True):
         """Check a completed local file without a network session or DB lock during hashing."""
         local = local_path(self.root, 'files/' + relative)
         with self.mutex:
             row = self.db.execute('SELECT * FROM files WHERE path=?', (relative,)).fetchone()
         if (not row or row['state'] != 'done' or row['size'] != entry.size
-                or not entry.modified or row['modified'] != entry.modified):
+                or require_modified and not entry.modified or row['modified'] != entry.modified):
             raise BackupError('SOURCE_CHANGED')
         if not local.is_file() or local.stat().st_size != entry.size:
             raise BackupError('LOCAL_FILE_CHANGED')
@@ -227,6 +226,7 @@ class CheckpointWriter:
         self.stream, self.digest = stream, digest
         self.offset, self.limit, self.deadline = offset, size, deadline
         self.callback, self.committed = commit, offset
+        self.persisted = None
 
     def write(self, data):
         if time.monotonic() > self.deadline:
@@ -241,7 +241,10 @@ class CheckpointWriter:
         return len(data)
 
     def commit(self):
+        if self.persisted == self.offset:
+            return
         self.stream.flush()
         os.fsync(self.stream.fileno())
         self.callback(self.offset, self.digest.hexdigest())
         self.committed = self.offset
+        self.persisted = self.offset

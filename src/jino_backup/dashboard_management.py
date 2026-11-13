@@ -482,10 +482,8 @@ class DashboardManagement:
             limit = 1 if task["kind"] == "databases" else 5
             if sum(item["kind"] == task["kind"] for item in active) >= limit:
                 continue
-            if task["kind"] == "files":
-                reserved = sum(self._file_slots(item) for item in active)
-                if reserved + self._file_slots(task) > 10:
-                    continue
+            # ConnectionBudget grants actual leases in the runner. Idle reservations
+            # must not prevent other servers from using the free connection slots.
             if any(item["row"] == task["row"] and (
                 item["kind"] == task["kind"]
                 or self._uses_panel(item) and self._uses_panel(task)

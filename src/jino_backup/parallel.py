@@ -12,7 +12,6 @@ from .downloads import local_path
 from .errors import BackupError
 from .retry import retry_call, TRANSIENT_ERRORS
 from .state import private_dir
-from .storage import sha256_file
 from .transfer import name_compatibility_issue, relative_path, source_for, display_remote_path, unsupported_type
 
 
@@ -22,6 +21,7 @@ class ConnectionBudget:
             raise BackupError("CONNECTION_LIMIT_INVALID")
         self.limit, self.used = limit, 0
         self.condition = threading.Condition()
+        self.waiters = 0
         self.verification_slot = threading.Semaphore(1)
 
     def snapshot(self):
@@ -30,19 +30,32 @@ class ConnectionBudget:
 
     @contextmanager
     def lease(self, control):
-        while True:
-            control.checkpoint()
-            with self.condition:
-                if self.used < self.limit:
-                    self.used += 1
-                    break
-                self.condition.wait(0.1)
+        waiting = False
+        try:
+            while True:
+                control.checkpoint()
+                with self.condition:
+                    if self.used < self.limit:
+                        self.used += 1
+                        break
+                    if not waiting:
+                        self.waiters += 1
+                        waiting = True
+                    self.condition.wait(0.1)
+        finally:
+            if waiting:
+                with self.condition:
+                    self.waiters -= 1
         try:
             yield
         finally:
             with self.condition:
                 self.used -= 1
                 self.condition.notify_all()
+
+    def contended(self):
+        with self.condition:
+            return self.waiters > 0
 
 
 class RunControl:
@@ -116,7 +129,8 @@ class MetadataSession:
                 raise
 
     def open(self):
-        return retry_call(lambda: self.call(lambda: None), wait=self.control.wait, notify=self.notify,
+        return retry_call(lambda: self.call(lambda: None), wait=self.control.wait,
+                          notify=lambda **event:self.notify(metadata_retry=True, **event),
                           phase="SCANNING")
 
     def close(self):
@@ -126,7 +140,7 @@ class MetadataSession:
     def listdir(self, parent):
         return retry_call(lambda: self.call(lambda: list(self.source.listdir(parent))),
                           wait=self.control.wait,
-                          notify=lambda **event: self.notify(directory=parent or "/", current_file="", **event),
+                          notify=lambda **event: self.notify(metadata_retry=True, directory=parent or "/", current_file="", **event),
                           phase="SCANNING")
 
     def stat(self, relative, low_priority=False):
@@ -146,7 +160,8 @@ class ParallelCollector:
         self.skip_types = skip_unsupported_types
         self.max_bytes, self.max_files, self.timeout, self.wait = max_bytes, max_files, timeout_seconds, wait
         self.verifying = 0
-        self.verify_queue = queue.Queue(maxsize=max_files)
+        self.verify_queue = queue.PriorityQueue(maxsize=max_files)
+        self.saved_bytes = self.saved_done = 0
 
     def collect(self, credentials, site, snapshot, checkpoint):
         self.snapshot, self.checkpoint = snapshot, checkpoint
@@ -155,7 +170,8 @@ class ParallelCollector:
         self.control = RunControl(self.base_control, self.abort, time.monotonic() + self.timeout, self.wait)
         self.files_queue = queue.Queue(maxsize=32)
         # Completed files must never fill the download queue or block inventory.
-        self.verify_queue = queue.Queue(maxsize=self.max_files)
+        self.verify_queue = queue.PriorityQueue(maxsize=self.max_files)
+        self.downloads_done = threading.Event()
         self.verifying = 0
         self.mutex = threading.RLock()
         self.emit_mutex = threading.RLock()
@@ -169,6 +185,8 @@ class ParallelCollector:
         with checkpoint.mutex:
             self.committed = {row["path"]: (row["state"], row["committed"])
                               for row in checkpoint.db.execute("SELECT path,state,committed FROM files")}
+        self.saved_bytes = sum(size for _, size in self.committed.values())
+        self.saved_done = sum(state == 'done' for state, _ in self.committed.values())
         checkpoint.on_commit = self.committed_file
         metadata = MetadataSession(self.metadata_factory(credentials, site), site, self.control, self.emit)
         self.metadata = metadata
@@ -202,11 +220,15 @@ class ParallelCollector:
                 try:
                     with ThreadPoolExecutor(max_workers=self.connections + 1, thread_name_prefix="ftps") as pool:
                         downloads.extend(pool.submit(run, False, index + 1) for index in range(self.connections - 1))
-                        downloads.append(pool.submit(run, verifier=True))
+                        verifier = pool.submit(run, verifier=True)
                         scanner = pool.submit(run, True)
                         scanner.result()
-                        for future in downloads:
-                            future.result()
+                        try:
+                            for future in downloads:
+                                future.result()
+                        finally:
+                            self.downloads_done.set()
+                        verifier.result()
                 finally:
                     metadata.close()
             if self.failure:
@@ -236,6 +258,8 @@ class ParallelCollector:
                 self.transfer_limit += 1
                 self.recovery_at = now + 60
             self.committed[path] = (state, size)
+            self.saved_bytes += size - previous_size
+            self.saved_done += int(state == 'done') - int(previous_state == 'done')
             for value in self.active.values():
                 if value["path"] == path:
                     value["received_bytes"] = size
@@ -247,7 +271,9 @@ class ParallelCollector:
 
     def _emit(self, **event):
         with self.mutex:
-            if event.get("stage") == "RETRY_WAIT" and not event.get('verification_retry'):
+            if (event.get("stage") == "RETRY_WAIT" and not event.get('verification_retry')
+                    and not event.get('metadata_retry')
+                    and event.get('operation') not in {'CWD','PWD','MLST','MLSD'}):
                 self.transfer_limit = max(1, self.transfer_limit - 1)
                 self.recovery_at = time.monotonic() + 60
             active = [dict(value) for value in self.active.values()]
@@ -255,8 +281,8 @@ class ParallelCollector:
                 event['stage'] = 'FILE_DOWNLOAD'
             pending_checks = self.verify_queue.unfinished_tasks
             default_stage = 'FILE_DOWNLOAD' if active else 'FILE_VERIFY' if pending_checks else 'FILES_DOWNLOAD'
-            values = {"stage": default_stage, "received_bytes": sum(size for _, size in self.committed.values()),
-                      "verified_files": sum(state == "done" for state, _ in self.committed.values()),
+            values = {"stage": default_stage, "received_bytes": self.saved_bytes,
+                      "verified_files": self.saved_done,
                       "planned_bytes": self.planned_bytes, "planned_files": self.planned_files,
                       "directories_seen": self.directories_seen,
                       "inventory_complete": self.inventory_complete,
@@ -337,7 +363,7 @@ class ParallelCollector:
                     if entry.size < 0 or self.planned_bytes > self.max_bytes:
                         raise BackupError("TRANSFER_LIMIT_EXCEEDED")
                     if self.committed.get(path, (None, 0))[0] == 'done':
-                        self.verify_queue.put_nowait((path, entry))
+                        self.verify_queue.put_nowait((1, path, entry))
                         continue
                     while True:
                         self.control.checkpoint()
@@ -360,9 +386,9 @@ class ParallelCollector:
         while True:
             self.control.checkpoint()
             try:
-                path, entry = self.verify_queue.get(timeout=0.1)
+                check_source, path, entry = self.verify_queue.get(timeout=0.1)
             except queue.Empty:
-                if self.scanned.is_set():
+                if self.scanned.is_set() and self.downloads_done.is_set():
                     return
                 continue
             item = None
@@ -370,7 +396,7 @@ class ParallelCollector:
                 self.emit(stage='FILE_VERIFY', log=True)
                 def once():
                     nonlocal item
-                    if self.metadata.stat(path, low_priority=True) != entry:
+                    if check_source and self.metadata.stat(path, low_priority=True) != entry:
                         raise BackupError('SOURCE_CHANGED')
                     while not self.budget.verification_slot.acquire(timeout=0.1):
                         self.control.checkpoint()
@@ -378,12 +404,13 @@ class ParallelCollector:
                         with self.mutex:
                             self.verifying += 1
                         self.emit()
-                        item = self.checkpoint.verify_done(path, entry, self.control)
+                        item = self.checkpoint.verify_done(path, entry, self.control,
+                                                          require_modified=bool(check_source))
                     finally:
                         with self.mutex:
                             self.verifying -= 1
                         self.budget.verification_slot.release()
-                    if self.metadata.stat(path, low_priority=True) != entry:
+                    if check_source and self.metadata.stat(path, low_priority=True) != entry:
                         raise BackupError('SOURCE_CHANGED')
                 retry_call(once, wait=self.control.wait,
                            notify=lambda **event: self.emit(verification_retry=True, **event),
@@ -421,6 +448,9 @@ class ParallelCollector:
                 try:
                     path, entry = self.files_queue.get(timeout=0.1)
                 except queue.Empty:
+                    if source is not None and self.budget.contended():
+                        stack.close()
+                        source = None
                     if self.scanned.is_set():
                         return
                     continue
@@ -448,9 +478,8 @@ class ParallelCollector:
                     retry_call(once, reconnect=getattr(source, "reconnect", None), wait=self.control.wait,
                                notify=lambda **event: self.emit(current_file=path, **event),
                                progress=lambda: self.checkpoint.committed_offset(path), phase="FILES_DOWNLOAD")
-                    item = {"path": path, "size_bytes": entry.size, "sha256": sha256_file(local)}
-                    with self.mutex:
-                        self.items.append(item)
+                    # Source was checked by fetch; verify the written artifact separately.
+                    self.verify_queue.put_nowait((0, path, entry))
                 except BackupError as error:
                     self.emit(stage="FILE_ERROR", log=True, current_file=path, error_code=error.code, **error.details)
                     if not self.continue_on_error or error.code not in {
