@@ -227,9 +227,13 @@ class ParallelCollector:
                       "planned_bytes": self.planned_bytes, "planned_files": self.planned_files,
                       "directories_seen": self.directories_seen,
                       "inventory_complete": self.inventory_complete,
+                      "processed_files": len(getattr(self, 'items', [])),
                       "active_files": active, "connections_limit": self.connections,
                       "active_transfers": len(active), **event}
             values["parallel_limit"] = self.transfer_limit
+            metadata_source = getattr(getattr(self, 'metadata', None), 'source', None)
+            values['metadata_mlst_checks'] = getattr(metadata_source, 'mlst_checks', 0)
+            values['metadata_listing_checks'] = getattr(metadata_source, 'stat_listings', 0)
             selected = next((item for item in active if item["path"] == event.get("current_file")), None)
             if "current_file" not in event:
                 selected = active[0] if active else None
@@ -328,19 +332,21 @@ class ParallelCollector:
                 worker = threading.get_ident()
                 with self.mutex:
                     self.active[worker] = {"path": path, "size_bytes": entry.size, "received_bytes": 0}
-                self.emit(stage="FILE_DOWNLOAD", log=True, current_file=path)
+                is_verified_copy = self.committed.get(path, (None, 0))[0] == 'done'
+                self.emit(stage="FILE_VERIFY" if is_verified_copy else "FILE_DOWNLOAD", log=True, current_file=path)
                 local = local_path(self.snapshot, "files/" + path)
                 final_event = {}
                 try:
                     def once():
                         self.control.checkpoint()
-                        if source.stat(path) != entry:
-                            raise BackupError("SOURCE_CHANGED")
+                        saved_local = local.exists()
+                        if saved_local and source.stat(path) != entry:
+                            raise BackupError('SOURCE_CHANGED')
                         if shutil.disk_usage(self.snapshot).free < entry.size + 1024 * 1024:
                             raise BackupError("STORAGE_SPACE_LOW")
                         self.checkpoint.fetch(source, path, entry, local, self.control.deadline)
-                        if source.stat(path) != entry:
-                            raise BackupError("SOURCE_CHANGED")
+                        if saved_local and source.stat(path) != entry:
+                            raise BackupError('SOURCE_CHANGED')
                     retry_call(once, reconnect=getattr(source, "reconnect", None), wait=self.control.wait,
                                notify=lambda **event: self.emit(current_file=path, **event),
                                progress=lambda: self.checkpoint.committed_offset(path), phase="FILES_DOWNLOAD")

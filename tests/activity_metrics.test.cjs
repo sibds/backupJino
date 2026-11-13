@@ -63,3 +63,14 @@ test('does not invent activity from queued jobs or bridge a browser reload', () 
   assert.equal(restored.row(null,70000).speed,null);
   assert.equal(restored.minutes[0].bytes,0);
 });
+test('rechecking saved files counts work without inventing downloaded bytes', () => {
+  const meter = new context.BackupActivity();
+  const sample = data(1000000,1000);
+  sample.servers[0].latest_tasks.files.progress.processed_files=0;
+  meter.observe(sample,60000);
+  sample.servers[0].latest_tasks.files.progress.processed_files=5;
+  meter.observe(sample,65000);
+  assert.equal(meter.minutes[0].files,5);
+  assert.equal(meter.minutes[0].bytes,0);
+  assert.equal(meter.row(1,65000).speed,0);
+});

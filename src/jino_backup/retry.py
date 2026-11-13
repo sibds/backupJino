@@ -27,7 +27,7 @@ def retry_call(operation, *, reconnect=None, wait=None, notify=None, phase="FILE
             if error.code not in TRANSIENT_ERRORS:
                 raise
             details = {}
-            if error.details.get("operation") in {"CONNECT", "CWD", "PWD", "MLSD", "RETR"}:
+            if error.details.get("operation") in {"CONNECT", "CWD", "PWD", "MLSD", "MLST", "RETR"}:
                 details["operation"] = error.details["operation"]
             for key, minimum, maximum in (("ftp_reply_code", 100, 599), ("curl_error_code", 1, 999)):
                 value = error.details.get(key)

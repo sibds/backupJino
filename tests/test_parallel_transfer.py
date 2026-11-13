@@ -10,6 +10,49 @@ from jino_backup.dashboard_management import TaskControl
 from test_backup import FixtureSource
 
 
+def test_new_parallel_file_has_only_the_two_required_source_checks(tmp_path):
+    from jino_backup.parallel import ConnectionBudget, ParallelCollector
+    root=tmp_path/'remote';root.mkdir();(root/'one.txt').write_bytes(b'synthetic')
+    checked=[]
+    def downloader(*args):
+        value=FixtureSource(root)
+        original=value.stat
+        value.stat=lambda path:checked.append(path) or original(path)
+        return value
+    collector=ParallelCollector(TaskControl(lambda state:None),lambda **event:None,ConnectionBudget(10),
+        metadata_factory=lambda *args:FixtureSource(root),download_factory=downloader)
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        collector.collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
+    assert checked==['one.txt','one.txt']
+
+
+def test_resume_reports_verification_work_without_redownloading_saved_files(tmp_path):
+    from jino_backup.parallel import ConnectionBudget, ParallelCollector
+    root=tmp_path/'remote';root.mkdir();(root/'one.txt').write_bytes(b'synthetic')
+    events, checks = [], []
+    reused = False
+    def downloader(*args):
+        value=FixtureSource(root)
+        original=value.stat
+        value.stat=lambda path:checks.append(path) or original(path)
+        if reused:
+            value.download=lambda *args:pytest.fail('Saved file downloaded again')
+        return value
+    def collector():
+        return ParallelCollector(TaskControl(lambda state:None),lambda **e:events.append(e),ConnectionBudget(10),
+            metadata_factory=lambda *args:FixtureSource(root),download_factory=downloader)
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        collector().collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
+    reused=True
+    checks.clear();events.clear()
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        collector().collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
+    assert checks==['one.txt','one.txt']
+    assert any(e['stage']=='FILE_VERIFY' for e in events)
+    assert events[-1]['processed_files']==1
+    assert events[-1]['received_bytes']==len(b'synthetic')
+
+
 def test_parallelism_recovers_only_after_cooldown_and_confirmed_progress(tmp_path):
     from jino_backup.parallel import ConnectionBudget, ParallelCollector
     root = tmp_path / "remote"

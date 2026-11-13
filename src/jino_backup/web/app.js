@@ -17,7 +17,7 @@ globalThis.BackupActivity = class BackupActivity {
         counters[server.row + ':' + kind] = {
           id: task.id, row: server.row, state: task.state,
           bytes: Math.max(0, Number(p.received_bytes) || 0),
-          files: kind === 'files' ? Math.max(0, Number(p.verified_files) || 0) : 0,
+          files: kind === 'files' ? Math.max(0, Number(p.processed_files ?? p.verified_files) || 0) : 0,
         };
       }
     }
@@ -103,8 +103,10 @@ const statuses = {
   STOPPED: ["Остановлено", "warning"],
   INTERRUPTED: ["Прервано", "warning"],
   UNKNOWN: ["Нет данных", ""],
+  INSPECTED: ["Список БД прочитан", ""],
 };
 const stages = {
+  FILE_VERIFY: "Проверка сохранённых файлов",
   RETRY_WAIT: "Ожидает переподключения",
   RETRY_EXHAUSTED: "Попытки восстановления исчерпаны",
   AUTHENTICATE: "Вход",
@@ -749,7 +751,7 @@ function renderTable() {
     speedLine.title = "Средняя скорость сохранения за последние 30 секунд наблюдения";
     const movementLine = element("span", "availability-sub",
       movement.files === null ? "Собираем данные о движении" :
-      `За эту минуту: +${count(movement.files)} файлов · ${formatMB(movement.bytes)} МБ`);
+      `За эту минуту проверено: ${count(movement.files)} файлов · ${formatMB(movement.bytes)} МБ`);
     const lastLine = element("span", "availability-sub",
       movement.advanced ? "Последний прирост: " + age(new Date(movement.advanced).toISOString()) : "Прирост пока не зафиксирован");
     const activityCell = element("div", "server-activity");

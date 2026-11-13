@@ -82,6 +82,18 @@ def ftps_server(tmp_path, *, include_ip=True):
                     reply("215 UNIX Type: L8")
                 elif command == "OPTS":
                     reply("200 Option accepted")
+                elif command == 'MLST':
+                    state['mlst_calls'] = state.get('mlst_calls', 0) + 1
+                    filename = argument.removeprefix('/public_html/')
+                    if not state.get('support_mlst'):
+                        reply('502 Unsupported command')
+                    elif filename not in files:
+                        reply('550 Not found')
+                    else:
+                        assert state['tls_control']
+                        reply('250-Listing')
+                        reply(f' type=file;size={len(files[filename])};modify=20261110090000; /public_html/{filename}')
+                        reply('250 End')
                 elif command == "SIZE":
                     filename = argument.removeprefix("/public_html/")
                     reply("213 " + str(len(files[filename])))

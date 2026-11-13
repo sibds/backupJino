@@ -88,6 +88,9 @@ class FtpsSource:
         self.credentials = credentials
         self.root = safe_root(site["remote_root"])
         self.ftp = None
+        self.mlst_supported = True
+        self.mlst_checks = 0
+        self.stat_listings = 0
 
     def __enter__(self):
         self.connect()
@@ -147,6 +150,7 @@ class FtpsSource:
             raise self._listing_rejection(error, "PWD") from None
         if self.canonical_root != "/" and canonical != self.canonical_root and not canonical.startswith(self.canonical_root + "/"):
             raise BackupError("REMOTE_PATH_UNSAFE")
+        return canonical
 
     @staticmethod
     def _listing_rejection(error, operation):
@@ -194,6 +198,56 @@ class FtpsSource:
 
     def stat(self, relative):
         parent, name = posixpath.split(relative_path(relative))
+        if self.mlst_supported:
+            operation = 'CWD'
+            try:
+                canonical = self._cwd(parent)
+                operation = 'MLST'
+                try:
+                    reply = self.ftp.sendcmd('MLST ' + name)
+                except ftplib.error_perm as error:
+                    if str(error)[:3] not in {'500','502','504'}:
+                        raise self._listing_rejection(error, operation) from None
+                    self.mlst_supported = False
+                else:
+                    lines = [line[1:] for line in reply.splitlines() if line.startswith(' ')]
+                    if len(lines) != 1:
+                        raise BackupError('REMOTE_LIST_INVALID', operation=operation)
+                    raw, separator, reported = lines[0].partition(' ')
+                    if not separator or not raw.endswith(';'):
+                        raise BackupError('REMOTE_LIST_INVALID', operation=operation)
+                    facts = {}
+                    for fact in raw[:-1].split(';'):
+                        key, equals, value = fact.partition('=')
+                        key = key.lower()
+                        if not equals or not key or key in facts:
+                            raise BackupError('REMOTE_LIST_INVALID', operation=operation)
+                        facts[key] = value
+                    if reported not in {name, posixpath.join(canonical, name)}:
+                        raise BackupError('SOURCE_CHANGED', operation=operation)
+                    if not {'type','modify'} <= facts.keys() or facts.get('type','').lower() == 'file' and 'size' not in facts:
+                        self.mlst_supported = False  # Insufficient facts: use the strict MLSD fallback.
+                    else:
+                        size = int(facts.get('size', '0'))
+                        if size < 0:
+                            raise ValueError('INVALID_SIZE')
+                        self.mlst_checks += 1
+                        return Entry(name, facts['type'].lower(), size, facts['modify'])
+            except ssl.SSLCertVerificationError:
+                self.close()
+                raise BackupError('TLS_CERTIFICATE_INVALID') from None
+            except UnicodeDecodeError:
+                self.close()
+                raise BackupError('REMOTE_LIST_ENCODING_INVALID', operation=operation) from None
+            except ValueError:
+                raise BackupError('REMOTE_LIST_INVALID', operation=operation) from None
+            except (OSError, EOFError, ftplib.Error) as error:
+                self.close()
+                details = {'operation':operation}
+                code = str(error)[:3] if isinstance(error, ftplib.Error) else ''
+                if code.isascii() and code.isdigit(): details['ftp_reply_code'] = int(code)
+                raise BackupError('TRANSFER_INTERRUPTED', **details) from None
+        self.stat_listings += 1
         matches = [entry for entry in self.listdir(parent) if entry.name == name]
         if len(matches) != 1:
             raise BackupError("SOURCE_CHANGED")
