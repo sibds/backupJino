@@ -5,6 +5,9 @@
   let loading = false;
   let pending = false;
   let serverSignature = "";
+  const selectedServers = new Set();
+  let bulkRequest = null;
+  let expandedTasks = new Set();
   let historyLimit = 20;
   const labels = window.backupTaskLabels;
   const node = element;
@@ -48,10 +51,11 @@
     note("Сохраняем изменения плана…");
     render();
     try {
-      await request(path, payload);
-      note("План обновлён");
+      const result=await request(path, payload);
+      note(result.rules_count ? 'Расписание сохранено: '+result.rules_count+' правил.' : result.tasks_count ? 'В очереди '+result.tasks_count+' заданий. Уже активные работы не дублируются.' : 'План обновлён');
       await load();
       await refresh();
+      return result;
     } catch (error) {
       note(error.message, true);
     } finally {
@@ -124,7 +128,7 @@
       ftps: "FTPS",
       sftp: "SFTP",
       https_panel: "Панель Jino",
-    }[task.transport];
+    }[task.transport] || 'Способ не указан';
     row.append(
       node(
         "p",
@@ -261,7 +265,11 @@
           !task.can_reorder
         )
       );
-      row.append(controls, schedule);
+      const more=node('details','plan-task-more');
+      more.open=expandedTasks.has(task.id);
+      const disclosure=node('summary','','Управление заданием');disclosure.dataset.focusKey=task.id+'-more';
+      more.append(disclosure,controls,schedule);
+      row.append(more);
     } else if (
       !task.server_deleted &&
       !task.historical &&
@@ -281,7 +289,9 @@
   }
 
   function render() {
-    $("plan-add-form").querySelector('[type="submit"]').disabled = pending;
+    const focused = document.activeElement?.dataset.focusKey;
+    expandedTasks=new Set([...document.querySelectorAll('#plan-view .plan-task-more[open]')].map(el=>el.closest('[data-task-id]').dataset.taskId));
+    renderSelectionSummary();
     $("resume-panel-queue").disabled = pending;
     if (!plan) return;
     const policy = plan.policy;
@@ -299,8 +309,9 @@
     $("resume-panel-queue").hidden = !policy.blocked;
     text("plan-pending-count", plan.pending.length);
     text("plan-completed-count", plan.completed.length);
+    text('plan-overview', 'В работе '+plan.pending.filter(t=>t.state==='RUNNING').length+' · Ожидает '+plan.pending.filter(t=>t.state!=='RUNNING').length+' · Повторяющихся правил '+(plan.rules||[]).filter(r=>r.enabled&&!r.stale).length);
+    renderRules();
     if (document.activeElement?.matches("#plan-view input")) return;
-    const focused = document.activeElement?.dataset.focusKey;
     for (const [key, completed] of [
       ["pending", false],
       ["completed", true],
@@ -324,7 +335,7 @@
     $("plan-more-history").hidden = plan.completed.length <= historyLimit;
     if (focused)
       for (const button of document.querySelectorAll(
-        "#plan-view button[data-focus-key]"
+        "#plan-view [data-focus-key]"
       )) {
         if (button.dataset.focusKey === focused)
           button.focus({ preventScroll: true });
@@ -346,57 +357,83 @@
 
   function populateServers() {
     if (!state.data) return;
-    const signature = state.data.servers
-      .map((server) =>
-        [
-          server.row,
-          server.name,
-          server.blocked,
-          server.configuration?.revision,
-        ].join("|")
-      )
-      .join(";");
+    const visible=visibleServers();
+    const signature=JSON.stringify([visible.map(s=>[s.row,s.name,s.login,s.blocked,s.status,s.configuration?.revision]),[...selectedServers],$('plan-files').checked,$('plan-databases').checked,pending]);
     if (signature === serverSignature) return;
     serverSignature = signature;
-    const selected = $("plan-server").value;
+    const focus=document.activeElement?.dataset.planRow;
     const fragment = document.createDocumentFragment();
-    const empty = node("option", "", "Выберите сервер");
-    empty.value = "";
-    fragment.append(empty);
-    for (const server of state.data.servers) {
-      const option = node(
-        "option",
-        "",
-        server.name +
-          " · " +
-          server.login +
-          (server.blocked ? " · Заблокирован" : "")
-      );
-      option.value = String(server.row);
-      option.disabled = server.blocked;
-      fragment.append(option);
+    for (const server of visible) {
+      const row=node('label','plan-server-choice');
+      const checkbox=node('input');checkbox.type='checkbox';checkbox.dataset.planRow=server.row;
+      checkbox.checked=selectedServers.has(server.row);checkbox.disabled=pending||!eligible(server)&&!checkbox.checked;
+      checkbox.setAttribute('aria-label','Выбрать сервер '+server.name);
+      checkbox.addEventListener('change',()=>{checkbox.checked?selectedServers.add(server.row):selectedServers.delete(server.row);populateServers();renderSelectionSummary();});
+      const name=node('span','plan-server-title');name.append(node('strong','',server.name),node('span','secondary-text',server.login));
+      row.append(checkbox,name,node('span','plan-server-state',server.blocked?'Заблокирован':!eligible(server)?'Нет нужного доступа':labels[server.status]||statuses[server.status]?.[0]||'Готов к планированию'));
+      fragment.append(row);
     }
-    $("plan-server").replaceChildren(fragment);
-    $("plan-server").value = selected;
-    selectTransport();
+    if (!visible.length) fragment.append(node('p','plan-empty','Серверы не найдены. Измените запрос поиска.'));
+    $('plan-servers').replaceChildren(fragment);
+    if (focus) $('plan-servers').querySelector('[data-plan-row="'+focus+'"]')?.focus({preventScroll:true});
+    renderSelectionSummary();
   }
 
-  function selectTransport() {
-    const server = state.data?.servers.find(
-      (item) => String(item.row) === $("plan-server").value
-    );
-    const db = $("plan-kind").value === "databases";
-    const protocol = server?.configuration?.protocol || "ftps";
-    for (const option of $("plan-transport").options)
-      option.disabled = db
-        ? option.value !== "https_panel"
-        : option.value !== "https_panel" && option.value !== protocol;
-    $("plan-transport").value = db ? "https_panel" : protocol;
-    $("plan-transport").disabled = db;
+  function eligible(server) {
+    return !server.blocked && (!$('plan-files').checked||server.configuration?.ftp_ready!==false) && (!$('plan-databases').checked||server.can_check!==false);
+  }
+  function visibleServers() {
+    const query=$('plan-search').value.trim().toLocaleLowerCase('ru');
+    return (state.data?.servers||[]).filter(s=>!query||(s.name+' '+s.login).toLocaleLowerCase('ru').includes(query));
+  }
+  function renderSelectionSummary() {
+    const kinds=Number($('plan-files').checked)+Number($('plan-databases').checked);
+    const valid=selectedServers.size>0 && kinds>0 && [...selectedServers].every(row=>{const s=state.data?.servers.find(s=>s.row===row);return s&&eligible(s);});
+    text('plan-selected-count','Выбрано '+selectedServers.size);
+    const plural=(n,forms)=>forms[n%100>=11&&n%100<=14?2:n%10===1?0:n%10>=2&&n%10<=4?1:2];
+    const total=selectedServers.size*kinds;
+    text('plan-bulk-summary',!selectedServers.size?'Выберите хотя бы один сервер':!kinds?'Выберите файлы или БД':!valid?'В выборе есть сервер без нужного доступа. Снимите его выбор.':selectedServers.size+' '+plural(selectedServers.size,['сервер','сервера','серверов'])+' · '+(kinds===2?'файлы и БД':$('plan-files').checked?'файлы':'БД')+' · '+total+' '+plural(total,['отдельное задание','отдельных задания','отдельных заданий']));
+    $('plan-submit').disabled=pending||!valid;
+    $('plan-submit').textContent=$('plan-repeat').value?'Сохранить расписание':'Добавить в очередь';
+    $('plan-apply-action').disabled=pending||!selectedServers.size||!kinds;
+    $('plan-clear').disabled=pending||!selectedServers.size;
+    const visible=visibleServers().filter(eligible);
+    const checked=visible.filter(s=>selectedServers.has(s.row)).length;
+    $('plan-select-all').checked=visible.length>0&&checked===visible.length;
+    $('plan-select-all').indeterminate=checked>0&&checked<visible.length;
+    $('plan-select-all').disabled=pending||!visible.length;
+    for (const id of ['plan-files','plan-databases','plan-repeat','plan-start-at','plan-priority','plan-bulk-action']) $(id).disabled=pending;
+    for (const input of $('plan-servers').querySelectorAll('input')) {
+      const server=state.data?.servers.find(s=>s.row===Number(input.dataset.planRow));
+      input.disabled=pending||!server||!eligible(server)&&!input.checked;
+    }
+  }
+  function intervalLabel(hours) {
+    return [...$('plan-repeat').options].find(o=>Number(o.value)===hours)?.textContent || hours+' ч';
+  }
+  function renderRules() {
+    const fragment=document.createDocumentFragment();
+    const rules=plan.rules||[];
+    text('plan-rules-count',rules.length);
+    for (const rule of rules) {
+      const row=node('article','plan-rule');
+      const name=node('a','plan-task-name',rule.server_name);name.href='#server/'+rule.row;
+      const info=node('div');info.append(name,node('p','secondary-text',(rule.kind==='files'?'Файлы':'БД')+' · '+intervalLabel(rule.every_hours)));
+      const timing=node('div');timing.append(node('strong','',rule.stale?'Привязка изменилась':rule.blocked?'Сервер заблокирован':!rule.enabled?'Выключено':'Следующая постановка'),node('p','helper',new Date(rule.next_at).toLocaleString('ru-RU')));
+      if (rule.last_error) timing.append(node('p','danger-text',rule.last_error));
+      const toggle=node('button','button secondary',rule.enabled?'Выключить':'Включить');toggle.type='button';toggle.disabled=pending||!rule.enabled&&(rule.stale||rule.blocked);
+      toggle.dataset.focusKey=rule.id+'-toggle';
+      toggle.setAttribute('aria-label',toggle.textContent+' расписание · '+rule.server_name+' · '+(rule.kind==='files'?'файлы':'БД'));
+      toggle.addEventListener('click',()=>change('/api/plan/action',{rows:[rule.row],files:rule.kind==='files',databases:rule.kind==='databases',rule_id:rule.id,action:rule.enabled?'disable_schedule':'enable_schedule'}));
+      row.append(info,timing,toggle);fragment.append(row);
+    }
+    if (!rules.length) fragment.append(node('p','plan-empty secondary-text','Расписаний пока нет. Выберите серверы и период повторения выше.'));
+    $('plan-rules').replaceChildren(fragment);
   }
 
   function route() {
     const visible = location.hash === "#plan";
+    document.body.classList.toggle('plan-mode',visible);
     $("plan-view").hidden = !visible;
     if (!visible) return;
     state.view = "plan";
@@ -404,7 +441,7 @@
     $("server-card").hidden = true;
     $("events-view").hidden = true;
     text("page-title", "План работ");
-    text("page-description", "Очередь, приоритет и история выполнения");
+    text("page-description", "Групповые выгрузки, расписания и текущая очередь");
     for (const button of document.querySelectorAll("[data-view]")) {
       const active = button.dataset.view === "plan";
       button.classList.toggle("selected", active);
@@ -417,22 +454,27 @@
 
   $("plan-add-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const row = Number($("plan-server").value);
     const payload = {
-      kind: $("plan-kind").value,
-      transport: $("plan-transport").value,
+      rows:[...selectedServers].sort((a,b)=>a-b),files:$('plan-files').checked,databases:$('plan-databases').checked,
+      every_hours:$('plan-repeat').value?Number($('plan-repeat').value):null,
       priority: $("plan-priority").value,
     };
     if ($("plan-start-at").value)
       payload.scheduled_at = new Date($("plan-start-at").value).toISOString();
-    await change("/api/servers/" + row + "/jobs", payload);
+    const signature=JSON.stringify(payload);
+    if (!bulkRequest||bulkRequest.signature!==signature) bulkRequest={signature,id:crypto.randomUUID()};
+    const result=await change('/api/plan/bulk',{...payload,request_id:bulkRequest.id});
+    if (result?.ok) bulkRequest=null;
   });
-  $("plan-server").addEventListener("change", selectTransport);
+  $('plan-search').addEventListener('input',populateServers);
+  $('plan-select-all').addEventListener('change',event=>{for(const s of visibleServers().filter(eligible)) event.target.checked?selectedServers.add(s.row):selectedServers.delete(s.row);populateServers();renderSelectionSummary();});
+  $('plan-clear').addEventListener('click',()=>{selectedServers.clear();populateServers();renderSelectionSummary();});
+  for(const id of ['plan-files','plan-databases','plan-repeat']) $(id).addEventListener('change',()=>{populateServers();renderSelectionSummary();});
+  $('plan-apply-action').addEventListener('click',()=>change('/api/plan/action',{rows:[...selectedServers],files:$('plan-files').checked,databases:$('plan-databases').checked,action:$('plan-bulk-action').value}));
   $("plan-more-history").addEventListener("click", () => {
     historyLimit += 20;
     render();
   });
-  $("plan-kind").addEventListener("change", selectTransport);
   $("resume-panel-queue").addEventListener("click", () =>
     change("/api/panel-policy/resume", {})
   );

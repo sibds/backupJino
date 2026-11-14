@@ -15,6 +15,7 @@
   let databaseVisible = [];
   const labels = {
     AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
+    DB_REDOWNLOAD_WAIT: "Ожидает повторного скачивания дампа",
     SCHEDULED: "Запланировано",
     WAITING_RATE_LIMIT: "Ожидает часового интервала",
     WAITING_OPERATOR: "Ожидает оператора",
@@ -22,6 +23,8 @@
     FILE_DOWNLOAD: "Передача файла",
     FILE_VERIFY: "Проверка сохранённых файлов",
     FILE_ERROR: "Ошибка передачи файла",
+    FILE_CONFLICT: "Нужно решить конфликт файлов",
+    FILE_RECONCILED: "Файлы сравнены",
     DIRECTORY_ERROR: "Не удалось прочитать каталог",
     SCANNING: "Чтение списка каталога",
     FILE_SKIPPED: "Объект пропущен",
@@ -403,6 +406,10 @@
       if (task?.auto_resume_at) fragment.append(node('p','notice warning',
         'Автопродолжение №' + task.auto_resume_count + ': ' + new Date(task.auto_resume_at).toLocaleString('ru-RU') +
         '. ' + (task.auto_resume_message || 'Временный сбой соединения') + '. Сохранённые части будут использованы повторно.'));
+      if (kind==='databases' && task?.db_redownload_count && !['FINISHED','STOPPED'].includes(task.state))
+        fragment.append(node('p',task.db_redownload_exhausted?'notice danger':'notice warning',
+          task.db_redownload_exhausted ? 'Три повтора скачивания исчерпаны. Повреждённый файл сохранён. Проверьте SQL на сервере; затем можно продолжить вручную.' :
+          'Повторное скачивание дампа: '+task.db_redownload_count+' из 3. Повреждённая версия остаётся до проверки и замены. Допуск панели сохраняется.'));
       if (kind === 'databases' && task?.inspect_only) fragment.append(node('p','helper','Только чтение списка БД из Jino. SQL не заказывается.'));
       const controls = node("div", "job-controls");
       const active = task && activeStates.includes(task.state);
@@ -707,6 +714,7 @@
           )
         );
       }
+      if (kind === 'files') renderFileConflicts(fragment, task);
       target.replaceChildren(fragment);
     }
     if (jobFocus) {
@@ -724,6 +732,53 @@
         area.focus({ preventScroll: true });
       }
     }
+  }
+
+  function conflictDate(value) {
+    if (!value) return 'Дата неизвестна';
+    if (/^\d{14}(?:\.\d+)?$/.test(value))
+      value=value.slice(0,4)+'-'+value.slice(4,6)+'-'+value.slice(6,8)+'T'+value.slice(8,10)+':'+value.slice(10,12)+':'+value.slice(12,14)+'Z';
+    else if (/^\d{9,19}(?:\.\d+)?$/.test(value)) {
+      const numeric=new Date(Number(value) * (value.split('.')[0].length > 12 ? 0.000001 : 1000));
+      if (Number.isNaN(numeric.getTime())) return 'Дата неизвестна';
+      value=numeric.toISOString();
+    }
+    const date=new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Дата неизвестна' : date.toLocaleString('ru-RU');
+  }
+
+  function renderFileConflicts(fragment, task) {
+    if (!task) return;
+    const seen=new Set();
+    const events=(detail?.conflict_events || []).filter(e=>e.task_id===task.id && e.conflict?.id);
+    if (!events.length) return;
+    const section=node('section','file-conflicts');
+    section.append(node('h4','','Конфликты файлов'),node('p','helper','Остальные файлы продолжают скачиваться. Решение применяется при продолжении этого задания; прежние копии сохраняются.'));
+    for (const event of events) {
+      const item=event.conflict;
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      const card=node('details','file-conflict');
+      card.open=seen.size===1;
+      card.append(node('summary','','Различаются: '+item.remote_path+' ↔ '+item.local_path));
+      for (const [label,path,size,date] of [['На сервере',item.remote_path,item.remote_size,item.remote_modified],['Сохранённый объект',item.local_path,item.local_size,item.local_modified]]) {
+        const line=node('p','');
+        line.append(node('strong','',label+': '),node('code','event-file',path),node('span','secondary-text',' · '+(Number.isFinite(size)?bytes(size):'Размер неизвестен')+' · '+conflictDate(date)));
+        card.append(line);
+      }
+      card.append(node('p','helper',item.remote_sha256 && item.local_sha256 ? 'SHA-256 различается: содержимое файлов не совпадает.' : 'Содержимое не сравнено: конфликт типов объектов или каталогов.'));
+      const decision=task.conflict_decisions?.[item.id];
+      if (decision) card.append(node('p','notice','Решение сохранено: '+({keep_both:'сохранить оба',use_remote:'использовать серверный',keep_local:'пропустить серверный'}[decision])+'. После завершения текущего прохода нажмите «Продолжить».'));
+      else {
+        const actions=node('div','job-controls');
+        const choose=value=>command('/api/tasks/'+task.id+'/conflict',{conflict_id:item.id,decision:value});
+        actions.append(actionButton('Сохранить оба',()=>choose('keep_both'),pending),actionButton('Пропустить серверный',()=>choose('keep_local'),pending));
+        if (item.reason==='LOCAL_CONTENT_DIFFERS') actions.append(actionButton('Использовать серверный',()=>choose('use_remote'),pending));
+        card.append(actions);
+      }
+      section.append(card);
+    }
+    fragment.append(section);
   }
 
   function renderLogs() {
@@ -755,6 +810,12 @@
       );
       if (event.error_code) row.append(node("code", "", event.error_code));
       if (event.file) row.append(node("span", "event-file", event.file));
+      if (event.conflict) {
+        const value=event.conflict;
+        row.append(node('span','event-file','Сервер: '+value.remote_path+' ↔ локально: '+value.local_path),
+          node('span','secondary-text','Размеры: '+(Number.isFinite(value.remote_size)?bytes(value.remote_size):'неизвестно')+' / '+(Number.isFinite(value.local_size)?bytes(value.local_size):'неизвестно')+' · '+
+            (event.action==='identical'?'Содержимое идентично; повторная копия не нужна.':event.action==='updated'?'Серверная версия обновлена; прежняя сохранена.':event.action==='kept_both'?'Обе версии сохранены.':'Содержимое различается либо требует проверки.')));
+      }
       if (event.directory)
         row.append(node("span", "event-file", "Каталог: " + event.directory));
       if (event.operation)

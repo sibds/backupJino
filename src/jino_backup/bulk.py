@@ -76,7 +76,8 @@ class DownloadBatch:
     def __init__(self, plan, destination, batch_id, remote_root, source_factory=source_for,
                  *, notify=None, max_bytes=1024**4, max_files=1000000,
                  timeout_seconds=86400, known_hosts=None, continue_on_error=False,
-                 skip_unsupported_names=False, skip_unsupported_types=False, retry_wait=None, collector=None):
+                 skip_unsupported_names=False, skip_unsupported_types=False, retry_wait=None, collector=None,
+                 resolve_conflicts=False, conflict_decision=None, conflict_notify=None):
         if not isinstance(batch_id, str) or not 1 <= len(batch_id) <= 160:
             raise BackupError('IDEMPOTENCY_KEY_INVALID')
         self.plan, self.destination = plan, Path(destination).absolute()
@@ -84,6 +85,8 @@ class DownloadBatch:
         self.skip_unsupported_types = skip_unsupported_types
         self.retry_wait = retry_wait
         self.collector = collector
+        self.resolve_conflicts, self.conflict_decision = resolve_conflicts, conflict_decision
+        self.conflict_notify = conflict_notify
         self.batch_id, self.run_id = batch_id, identity('download', batch_id)
         self.remote_root, self.source_factory = safe_root(remote_root), source_factory
         self.max_bytes, self.max_files, self.timeout_seconds = max_bytes, max_files, timeout_seconds
@@ -107,6 +110,16 @@ class DownloadBatch:
             **({'event':'retry_wait','attempt':data['retry_attempt'], 'delay_seconds':data['retry_delay_seconds']}
                if data.get('stage')=='RETRY_WAIT' else {})})
         with DirectoryCheckpoint(snapshot, scope, event) as progress:
+            progress.resolve_conflicts = self.resolve_conflicts
+            if self.conflict_decision:
+                progress.conflict_decision = self.conflict_decision
+            if self.conflict_notify:
+                previous_notify = progress.notify
+                def notify_checkpoint(value):
+                    previous_notify(value)
+                    if value.get('stage') in {'FILE_RECONCILED','FILE_CONFLICT'}:
+                        self.conflict_notify(log=True, **value)
+                progress.notify = notify_checkpoint
             manifest_path = local_path(snapshot, 'manifest.json')
             if manifest_path.exists():
                 try:

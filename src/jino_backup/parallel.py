@@ -177,6 +177,7 @@ class ParallelCollector:
         self.emit_mutex = threading.RLock()
         self.failure = None
         self.items, self.directories, self.errors, self.skipped = [], [], [], []
+        self.collisions, self.duplicates, self.local_conflicts = [], [], []
         self.active, self.planned_bytes, self.planned_files, self.directories_seen = {}, 0, 0, 0
         self.incomplete = False
         self.inventory_complete = False
@@ -229,6 +230,8 @@ class ParallelCollector:
                         finally:
                             self.downloads_done.set()
                         verifier.result()
+                        if self.collisions or self.local_conflicts:
+                            self.reconcile_conflicts(credentials, site)
                 finally:
                     metadata.close()
             if self.failure:
@@ -244,6 +247,10 @@ class ParallelCollector:
                 result["errors"] = self.errors
             if self.skipped:
                 result["skipped"] = self.skipped
+            if self.duplicates:
+                result['duplicates'] = self.duplicates
+            if checkpoint.retained_items():
+                result['retained_local'] = checkpoint.retained_items()
             self.emit(stage="FILES_DOWNLOAD", log=True)
             return result
         finally:
@@ -304,7 +311,7 @@ class ParallelCollector:
         self.progress(**values)
 
     def scan(self):
-        pending, seen = [("", 0)], set()
+        pending, seen = [("", 0)], {}
         while pending:
             self.control.checkpoint()
             parent, depth = pending.pop()
@@ -326,9 +333,31 @@ class ParallelCollector:
                 self.control.checkpoint()
                 issue = name_compatibility_issue(entry.name)
                 path = posixpath.join(parent, entry.name)
-                if path.casefold() in seen:
-                    raise BackupError("REMOTE_PATH_COLLISION")
-                seen.add(path.casefold())
+                storage_key = (path if issue else self.checkpoint.storage_path(path)).casefold()
+                if storage_key in seen:
+                    peer, previous = seen[storage_key]
+                    if not self.continue_on_error:
+                        raise BackupError("REMOTE_PATH_COLLISION", path=path, other_path=peer)
+                    if entry.kind == previous.kind == 'file':
+                        self.planned_files += 1
+                        self.planned_bytes += entry.size
+                        if entry.size < 0 or self.planned_bytes > self.max_bytes:
+                            raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                        self.collisions.append((path, entry, peer))
+                        if len(self.collisions) + len(seen) > self.max_files:
+                            raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                        continue
+                    else:
+                        from .file_conflicts import directory_conflict
+                        try:
+                            directory_conflict(self.checkpoint,path,entry,peer,previous)
+                        except BackupError as error:
+                            if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                                raise
+                            self.errors.append({'path':path,'error_code':error.code,**error.details})
+                            self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
+                            continue
+                seen[(path if issue else self.checkpoint.storage_path(path)).casefold()] = (path, entry)
                 if len(seen) > self.max_files:
                     raise BackupError("TRANSFER_LIMIT_EXCEEDED")
                 if issue:
@@ -354,15 +383,25 @@ class ParallelCollector:
                               skip_reason=special, error_code="REMOTE_TYPE_UNSUPPORTED")
                     continue
                 if entry.kind == "dir":
-                    private_dir(local_path(self.snapshot, "files/" + path))
-                    self.directories.append(path)
+                    try:
+                        self.checkpoint.prepare_directory(path,entry)
+                    except BackupError as error:
+                        if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                            raise
+                        self.errors.append({'path':path,'error_code':error.code,**error.details})
+                        self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
+                        continue
+                    self.directories.append(self.checkpoint.storage_path(path))
                     pending.append((path, depth + 1))
                 elif entry.kind == "file":
                     self.planned_files += 1
                     self.planned_bytes += entry.size
                     if entry.size < 0 or self.planned_bytes > self.max_bytes:
                         raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-                    if self.committed.get(path, (None, 0))[0] == 'done':
+                    with self.checkpoint.mutex:
+                        saved = self.checkpoint.db.execute('SELECT size,modified FROM files WHERE path=?',(path,)).fetchone()
+                    if (self.committed.get(path, (None, 0))[0] == 'done'
+                            and saved and saved['size']==entry.size and saved['modified']==entry.modified):
                         self.verify_queue.put_nowait((1, path, entry))
                         continue
                     while True:
@@ -418,7 +457,10 @@ class ParallelCollector:
                 with self.mutex:
                     self.items.append(item)
             except BackupError as error:
-                self.emit(stage='FILE_ERROR', log=True, error_code=error.code, **error.details)
+                self.emit(stage='FILE_ERROR', log=True, current_file=path, error_code=error.code, **error.details)
+                if self.checkpoint.resolve_conflicts and error.code in {'LOCAL_FILE_CHANGED','SOURCE_CHANGED'}:
+                    self.local_conflicts.append((path, entry))
+                    continue
                 if not self.continue_on_error or error.code not in {
                     'SOURCE_CHANGED', 'TRANSFER_DENIED', 'LOCAL_FILE_CHANGED',
                     'LOCAL_PROGRESS_INVALID', 'REMOTE_DIRECTORY_UNAVAILABLE',
@@ -460,9 +502,9 @@ class ParallelCollector:
                 worker = threading.get_ident()
                 with self.mutex:
                     self.active[worker] = {"path": path, "size_bytes": entry.size, "received_bytes": 0}
-                is_verified_copy = self.committed.get(path, (None, 0))[0] == 'done'
+                is_verified_copy = False  # Saved unchanged files are handled only by verify_queue.
                 self.emit(stage="FILE_VERIFY" if is_verified_copy else "FILE_DOWNLOAD", log=True, current_file=path)
-                local = local_path(self.snapshot, "files/" + path)
+                local = self.checkpoint.file_path(path)
                 final_event = {}
                 try:
                     def once():
@@ -484,7 +526,7 @@ class ParallelCollector:
                     self.emit(stage="FILE_ERROR", log=True, current_file=path, error_code=error.code, **error.details)
                     if not self.continue_on_error or error.code not in {
                         "SOURCE_CHANGED", "TRANSFER_DENIED", "LOCAL_FILE_CHANGED", "LOCAL_PROGRESS_INVALID",
-                        "REMOTE_DIRECTORY_UNAVAILABLE",
+                        "REMOTE_DIRECTORY_UNAVAILABLE", 'FILE_CONFLICT_PENDING', 'FILE_CONFLICT_SKIPPED',
                     }:
                         if error.code in TRANSIENT_ERRORS:
                             final_event = {"stage": "RETRY_EXHAUSTED", "log": True,
@@ -493,8 +535,43 @@ class ParallelCollector:
                         raise
                     with self.mutex:
                         self.errors.append({"path": path, "error_code": error.code, **error.details})
+                    if error.code in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                        self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
                 finally:
                     with self.mutex:
                         self.active.pop(worker, None)
                     self.files_queue.task_done()
                     self.emit(**final_event)
+
+    def reconcile_conflicts(self, credentials, site):
+        from .file_conflicts import reconcile
+        with self.budget.lease(self.control), self.download_factory(credentials, site, self.metadata, self.control) as source:
+            for path, entry in self.local_conflicts:
+                self.control.checkpoint()
+                try:
+                    if source.stat(path) != entry:
+                        raise BackupError('SOURCE_CHANGED')
+                    self.checkpoint.fetch(source,path,entry,None,self.control.deadline)
+                    if source.stat(path) != entry:
+                        raise BackupError('SOURCE_CHANGED')
+                    self.items.append(self.checkpoint.verify_done(path,entry,self.control))
+                except BackupError as error:
+                    if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED','SOURCE_CHANGED','LOCAL_FILE_CHANGED'}:
+                        raise
+                    self.errors.append({'path':path,'error_code':error.code,**error.details})
+                    self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
+            for path, entry, peer in self.collisions:
+                self.control.checkpoint()
+                try:
+                    outcome = reconcile(self.checkpoint,source,path,entry,self.control.deadline,peer=peer)
+                    if outcome['action']=='identical':
+                        self.duplicates.append({'source_path':path,'stored_path':self.checkpoint.storage_path(peer),
+                                                'sha256':outcome['conflict']['remote_sha256']})
+                    else:
+                        self.items.append(self.checkpoint.verify_done(path,entry,self.control))
+                    self.emit(stage='FILE_RECONCILED',log=True,**outcome)
+                except BackupError as error:
+                    if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED','SOURCE_CHANGED','LOCAL_FILE_CHANGED'}:
+                        raise
+                    self.errors.append({'path':path,'error_code':error.code,**error.details})
+                    self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)

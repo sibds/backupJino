@@ -226,6 +226,9 @@ class OperatorRunner:
                     notify=lambda event: progress(received_bytes=event.get("bytes_saved"))
                     if task["transport"] != "ftps" else None,
                     continue_on_error=True,
+                    resolve_conflicts=True,
+                    conflict_decision=lambda key:self.data.management.task(task['id']).get('conflict_decisions',{}).get(key),
+                    conflict_notify=progress,
                     skip_unsupported_names=skip_names,
                     skip_unsupported_types=True,
                     retry_wait=control.wait,

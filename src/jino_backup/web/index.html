@@ -402,34 +402,25 @@
           </div>
         </section>
         <section id="plan-view" hidden aria-label="План работ">
-          <form id="plan-add-form" class="plan-composer">
-            <label
-              >Сервер<select id="plan-server" required>
-                <option value="">Выберите сервер</option>
-              </select></label
-            ><label
-              >Работа<select id="plan-kind">
-                <option value="files">Файлы</option>
-                <option value="databases">Дампы БД</option>
-              </select></label
-            ><label
-              >Транспорт<select id="plan-transport">
-                <option value="ftps">FTPS</option>
-                <option value="sftp">SFTP</option>
-                <option value="https_panel">Панель Jino</option>
-              </select></label
-            ><label
-              >Начать не раньше<input
-                id="plan-start-at"
-                type="datetime-local" /></label
-            ><label
-              >Важность<select id="plan-priority">
-                <option value="normal">Обычная</option>
-                <option value="critical">Критичная</option>
-              </select></label
-            ><button class="button primary" type="submit">
-              Добавить в очередь
-            </button>
+          <div class="plan-overview" id="plan-overview" aria-live="polite"></div>
+          <form id="plan-add-form" class="plan-composer plan-builder">
+            <section class="plan-picker" aria-labelledby="plan-pick-title">
+              <div class="plan-heading"><h2 id="plan-pick-title">Выберите серверы</h2><span id="plan-selected-count" aria-live="polite">Выбрано 0</span></div>
+              <label>Найти сервер<input id="plan-search" type="search" placeholder="Имя или логин" autocomplete="off" /></label>
+              <div class="plan-selection-tools"><label class="plan-check"><input id="plan-select-all" type="checkbox" />Все доступные в списке</label><button id="plan-clear" class="button text-button" type="button">Снять выбор</button></div>
+              <div id="plan-servers" class="plan-servers" aria-label="Серверы для групповой операции"></div>
+            </section>
+            <section class="plan-settings" aria-labelledby="plan-options-title">
+              <h2 id="plan-options-title">Что и когда выгружать</h2>
+              <fieldset class="plan-copy-kinds"><legend>Состав копии</legend><label class="plan-check"><input id="plan-files" type="checkbox" checked />Файлы сайтов</label><label class="plan-check"><input id="plan-databases" type="checkbox" />Дампы БД</label></fieldset>
+              <p class="helper">Файлы — по настроенному FTPS/SFTP. БД — последний доступный снимок Jino, с его исходной датой.</p>
+              <label>Повторять<select id="plan-repeat"><option value="">Не повторять</option><option value="3">Каждые 3 часа</option><option value="6">Каждые 6 часов</option><option value="12">Каждые 12 часов</option><option value="24">Раз в день</option><option value="72">Раз в 3 дня</option><option value="120">Раз в 5 дней</option><option value="168">Раз в неделю</option><option value="336">Раз в 2 недели</option><option value="720">Раз в месяц · 30 дней</option><option value="2160">Раз в 3 месяца · 90 дней</option><option value="4320">Раз в 6 месяцев · 180 дней</option><option value="6480">Раз в 9 месяцев · 270 дней</option><option value="8760">Раз в год · 365 дней</option></select></label>
+              <div class="plan-time-options"><label>Первый запуск<input id="plan-start-at" type="datetime-local" /></label><label>Важность<select id="plan-priority"><option value="normal">Обычная</option><option value="critical">Критичная</option></select></label></div>
+              <p class="helper">Без даты — поставить сейчас. Время означает постановку в очередь: начало зависит от свободных слотов и допуска панели.</p>
+              <p id="plan-bulk-summary" class="plan-bulk-summary" aria-live="polite">Выберите хотя бы один сервер</p>
+              <button class="button primary" type="submit" id="plan-submit" disabled>Добавить в очередь</button>
+              <div class="plan-group-actions"><label>Действие для выбранных<select id="plan-bulk-action"><option value="pause">Приостановить задания</option><option value="resume">Продолжить задания</option><option value="stop">Остановить задания</option><option value="disable_schedule">Выключить расписание</option><option value="enable_schedule">Включить расписание</option></select></label><button id="plan-apply-action" type="button" class="button secondary" disabled>Применить</button></div>
+            </section>
           </form>
           <section class="panel-policy">
             <div>
@@ -462,6 +453,7 @@
             учитывается при любом порядке.
           </p>
           <div id="plan-pending" class="plan-list"></div>
+          <section class="plan-recurring" aria-labelledby="plan-rules-title"><div class="plan-heading"><h2 id="plan-rules-title">Повторяющиеся выгрузки</h2><span id="plan-rules-count">0</span></div><p class="helper">Правила работают при запущенном приложении. Файлы и БД получают отдельные задания; активные и приостановленные работы не дублируются.</p><div id="plan-rules" class="plan-list"></div></section>
           <div class="plan-heading">
             <h2>Выполненные работы</h2>
             <span id="plan-completed-count"></span>

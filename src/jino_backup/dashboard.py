@@ -25,6 +25,12 @@ from .state import Settings, write_json, private_dir
 
 
 ERROR_LABELS = {
+    'FILE_CONFLICT_PENDING':'Конфликт имён или содержимого: требуется решение. Остальная выгрузка продолжается.',
+    'FILE_CONFLICT_SKIPPED':'Конфликтующий серверный объект пропущен по решению пользователя.',
+    'REMOTE_PATH_COLLISION':'Совпадение локальных путей для разных серверных имён.',
+    'LOCAL_FILE_CHANGED':'Локальная копия отличается от проверенной. Требуется сравнение с сервером.',
+    'LOCAL_PROGRESS_INVALID':'Сохранённая часть файла не прошла проверку. Она сохранена; остальные файлы обрабатываются.',
+    'LOCAL_DESTINATION_CONFLICT':'Локальный объект мешает сохранить серверный файл по этому пути.',
     "PANEL_RATE_LIMIT": "Ожидает следующего разрешённого входа в панель",
     "PANEL_AUTH_PAUSED": "Входы в панель приостановлены после CAPTCHA",
     "SCHEDULE_INVALID": "Укажите дату и время с часовым поясом",
@@ -832,8 +838,9 @@ class DashboardData:
         directory_events = self.management.events(row, limit=500, stage="DIRECTORY_ERROR") if self.management else []
         for event in directory_events:
             event["message"] = ERROR_LABELS.get(event.get("error_code"))
+        conflict_events = self.management.events(row, limit=500, stage='FILE_CONFLICT') if self.management else []
         return {"server": server, "events": events[:500], "skipped_events": skipped_events,
-                "directory_events": directory_events}
+                "directory_events": directory_events, 'conflict_events':conflict_events}
 
     def work_plan(self):
         plan = self.enable_management().plan()
@@ -1236,11 +1243,11 @@ def make_server(data, *, port=8765):
                 r"/api/servers/(\d+)(?:/(jobs|database-schedules|block|unblock|delete))?", path
             )
             task_route = re.fullmatch(
-                r"/api/tasks/(operator-[a-f0-9]{24})/(pause|resume|stop|move|schedule|priority)",
+                r"/api/tasks/(operator-[a-f0-9]{24})/(pause|resume|stop|move|schedule|priority|conflict)",
                 path,
             )
             if (
-                path not in {"/api/checks", "/api/servers", "/api/panel-policy/resume"}
+                path not in {"/api/checks", "/api/servers", "/api/panel-policy/resume",'/api/plan/bulk','/api/plan/action'}
                 and not server_route
                 and not task_route
             ):
@@ -1256,6 +1263,12 @@ def make_server(data, *, port=8765):
                     management = data.enable_management()
                     if path == "/api/panel-policy/resume":
                         result = management.resume_panel_queue()
+                    elif path == '/api/plan/bulk':
+                        result = management.work_plans.submit(payload)
+                    elif path == '/api/plan/action':
+                        result = management.work_plans.action(payload)
+                    elif task_route and task_route[2] == 'conflict':
+                        result = management.resolve_conflict(task_route[1],payload)
                     elif task_route and task_route[2] in {"move", "schedule", "priority"}:
                         result = management.change(task_route[1], task_route[2], payload)
                     elif task_route:

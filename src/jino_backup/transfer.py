@@ -388,7 +388,8 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
     destination = Path(destination)
     private_dir(destination)
     deadline = time.monotonic() + timeout_seconds
-    queue, seen, files, directories = [("", 0)], set(), [], []
+    queue, seen, files, directories = [("", 0)], {}, [], []
+    duplicates=[]
     total = planned = 0
     errors=[]
     skipped=[]
@@ -411,9 +412,33 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
             if issue and not skip_unsupported_names:
                 raise BackupError("REMOTE_PATH_UNSAFE")
             relative = posixpath.join(parent, entry.name)
-            if relative.casefold() in seen:
-                raise BackupError("REMOTE_PATH_COLLISION")
-            seen.add(relative.casefold())
+            storage_key = (checkpoint.storage_path(relative) if checkpoint and not issue else relative).casefold()
+            if storage_key in seen:
+                peer, previous = seen[storage_key]
+                if not continue_on_error or checkpoint is None:
+                    raise BackupError("REMOTE_PATH_COLLISION", path=relative, other_path=peer)
+                try:
+                    if entry.kind == previous.kind == 'file':
+                        from .file_conflicts import reconcile
+                        planned += entry.size
+                        if entry.size < 0 or planned > max_bytes:
+                            raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                        outcome=reconcile(checkpoint,source,relative,entry,deadline,peer=peer)
+                        if outcome['action']=='identical':
+                            duplicates.append({'source_path':relative,'stored_path':checkpoint.storage_path(peer),
+                                               'sha256':outcome['conflict']['remote_sha256']})
+                            checkpoint.notify({'stage':'FILE_RECONCILED',**outcome})
+                            continue
+                    else:
+                        from .file_conflicts import directory_conflict
+                        directory_conflict(checkpoint,relative,entry,peer,previous)
+                except BackupError as error:
+                    if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                        raise
+                    errors.append({'path':relative,'error_code':error.code,**error.details})
+                    checkpoint.notify({'stage':'FILE_CONFLICT','error_code':error.code,**error.details})
+                    continue
+            seen[(checkpoint.storage_path(relative) if checkpoint and not issue else relative).casefold()] = (relative, entry)
             if len(seen) > max_files:
                 raise BackupError("TRANSFER_LIMIT_EXCEEDED")
             if issue:
@@ -429,10 +454,20 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                 skipped.append(omission)
                 errors.append(dict(omission))
                 continue
-            local = destination.joinpath(*relative.split("/"))
+            local = checkpoint.file_path(relative) if checkpoint else destination.joinpath(*relative.split("/"))
             if entry.kind == "dir":
-                private_dir(local)
-                directories.append(relative)
+                if checkpoint:
+                    try:
+                        checkpoint.prepare_directory(relative,entry)
+                    except BackupError as error:
+                        if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                            raise
+                        errors.append({'path':relative,'error_code':error.code,**error.details})
+                        checkpoint.notify({'stage':'FILE_CONFLICT','error_code':error.code,**error.details})
+                        continue
+                else:
+                    private_dir(local)
+                directories.append(checkpoint.storage_path(relative) if checkpoint else relative)
                 queue.append((relative, depth + 1))
                 continue
             if entry.kind != "file":
@@ -445,6 +480,7 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                 raise BackupError("STORAGE_SPACE_LOW")
             try:
                 def copy_once():
+                    nonlocal local
                     if time.monotonic() > deadline:
                         raise BackupError("TRANSFER_TIMEOUT")
                     current = source.stat(relative)
@@ -452,6 +488,7 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                         raise BackupError("SOURCE_CHANGED")
                     if checkpoint is not None:
                         checkpoint.fetch(source, relative, entry, local, deadline)
+                        local = checkpoint.file_path(relative)
                     else:
                         offset = local.stat().st_size if local.exists() and entry.modified else 0
                         with local.open("ab" if offset else "wb") as stream:
@@ -466,11 +503,16 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                     retry_call(copy_once, reconnect=getattr(source, 'reconnect', None))
             except BackupError as exc:
                 if not continue_on_error or exc.code not in {'SOURCE_CHANGED','TRANSFER_DENIED',
-                        'LOCAL_FILE_CHANGED','LOCAL_PROGRESS_INVALID'}:
+                        'LOCAL_FILE_CHANGED','LOCAL_PROGRESS_INVALID','FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                     raise
-                errors.append({'path':relative,'error_code':exc.code})
+                errors.append({'path':relative,'error_code':exc.code,**exc.details})
+                if checkpoint and exc.code in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                    checkpoint.notify({'stage':'FILE_CONFLICT','error_code':exc.code,**exc.details})
                 continue
-            files.append({"path": relative, "size_bytes": entry.size, "sha256": sha256_file(local)})
+            local = checkpoint.file_path(relative) if checkpoint else local
+            stored=checkpoint.storage_path(relative) if checkpoint else relative
+            files.append({"path": stored, **({'source_path':relative} if stored!=relative else {}),
+                          "size_bytes": entry.size, "sha256": sha256_file(local)})
             total += entry.size
     if not files and not errors:
         raise BackupError("FILES_MISSING")
@@ -481,4 +523,8 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
         result['errors']=errors
     if skipped:
         result['skipped']=skipped
+    if duplicates:
+        result['duplicates']=duplicates
+    if checkpoint and checkpoint.retained_items():
+        result['retained_local']=checkpoint.retained_items()
     return result

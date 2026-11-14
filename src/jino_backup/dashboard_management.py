@@ -112,6 +112,8 @@ class DashboardManagement:
         self.inventory = DatabaseInventory(data.state_dir / 'database-inventory.sqlite3', inventory_key)
         data.database_inventory = self.inventory
         self.scheduling_databases = False
+        from .work_plans import WorkPlans
+        self.work_plans=WorkPlans(self)
         self.access_policy = access_policy or PanelAccessPolicy(data.state_dir)
         self.guard = FileLock(data.state_dir / "dashboard-management.lock")
         self.guard.__enter__()
@@ -216,6 +218,15 @@ class DashboardManagement:
             event["retry_at"] = details["retry_at"]
         if isinstance(details.get("directory"), str):
             event["directory"] = details["directory"][:2000]
+        conflict = details.get('conflict')
+        if stage in {'FILE_CONFLICT','FILE_RECONCILED'} and isinstance(conflict, dict):
+            allowed = {'id','remote_path','local_path','remote_size','local_size','remote_modified',
+                       'local_modified','remote_sha256','local_sha256','same_content','remote_newer',
+                       'reason','remote_kind','local_kind'}
+            event['conflict'] = {key:value for key,value in conflict.items() if key in allowed
+                                 and (value is None or type(value) in {str,int,bool})}
+            if details.get('action') in {'identical','updated','kept_both'}:
+                event['action'] = details['action']
         if details.get("operation") in {"CWD", "PWD", "MLSD", "MLST", "RETR"}:
             event["operation"] = details["operation"]
         if type(details.get("ftp_reply_code")) is int and 100 <= details["ftp_reply_code"] <= 599:
@@ -413,7 +424,27 @@ class DashboardManagement:
             self._update(task_id, state=state)
             self.event(task["row"], state, kind=task["kind"], task_id=task_id)
 
-    
+    def resolve_conflict(self, task_id, payload):
+        import re
+        with self.lock:
+            task = self.task(task_id)
+            key, decision = payload.get('conflict_id'), payload.get('decision')
+            if (task['kind'] != 'files' or not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key)
+                    or decision not in {'keep_both','use_remote','keep_local'}):
+                raise BackupError('REQUEST_INVALID')
+            server = self.catalog.get(task['row'])
+            if server['blocked'] or server['binding_revision'] != task['revision']:
+                raise BackupError('SERVER_CONFIG_CHANGED')
+            with self.catalog.connection() as db:
+                found = db.execute("SELECT payload FROM events WHERE row_id=? AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.stage')='FILE_CONFLICT' AND json_extract(payload,'$.conflict.id')=? LIMIT 1",
+                                   (task['row'],task_id,key)).fetchone()
+            if not found:
+                raise BackupError('REQUEST_INVALID')
+            decisions = dict(task.get('conflict_decisions',{}))
+            decisions[key] = decision
+            self._update(task_id,conflict_decisions=decisions)
+            return {'ok':True,'apply_on_resume':True}
+
     def action(self, task_id, action):
         if action not in {"pause", "resume", "stop"}:
             raise BackupError("REQUEST_INVALID")
@@ -475,6 +506,7 @@ class DashboardManagement:
             self.timer.cancel()
             self.timer = None
         self._schedule_databases()
+        self.work_plans.tick()
         all_tasks = self.tasks()
         active = [task for task in all_tasks if task["id"] in self.running]
         next_wake = []
@@ -533,6 +565,8 @@ class DashboardManagement:
             )
             self.executor.submit(self._run, task["id"])
         if any(x.get('schedule', {}).get('enabled') for server in self.catalog.all() if not server['deleted'] for x in self.inventory.list(server['row'], server['binding_revision'])):
+            next_wake.append(time.time()+60)
+        if any(rule['enabled'] and not rule['stale'] and not rule['blocked'] for rule in self.work_plans.list()):
             next_wake.append(time.time()+60)
         if next_wake:
             delay = min(60, max(0.1, min(next_wake) - time.time()))
@@ -699,7 +733,7 @@ class DashboardManagement:
                 candidates.remove(chosen)
             if policy["blocked_row"] in servers:
                 policy["blocked_server_name"] = servers[policy["blocked_row"]]["name"]
-            return {"pending": pending, "completed": completed, "policy": policy}
+            return {"pending": pending, "completed": completed, "policy": policy,'rules':self.work_plans.list()}
 
     def resume_panel_queue(self):
         with self.lock:
@@ -889,7 +923,7 @@ class DashboardManagement:
                     **progress,
                     **{key: values[key] for key in ("skipped_path", "skip_reason", "skipped_kind") if key in values},
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
-                       "curl_error_code", "curl_error_kind", "progress_advanced") if key in values},
+                       "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action') if key in values},
                 )
 
     def close(self):
