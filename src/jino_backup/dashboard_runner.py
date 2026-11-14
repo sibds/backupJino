@@ -310,15 +310,20 @@ class OperatorRunner:
                 return {'status':'INSPECTED', 'snapshot_databases_count':len(names), 'source_snapshot_date':snapshot}
             control.checkpoint()
             progress(expected_count=len(selected_scope["databases"]), verified_count=0)
-            reused = completed_database_copy(
-                self.data.state_dir,
-                self.data.destination,
-                server["account_ref"],
-                server["folder"],
-                selected_scope,
-                key,
-                allow_subset=selected is not None,
-            )
+            try:
+                reused = None if task.get('db_redownload_count') or task.get('db_repair_job_id') else completed_database_copy(
+                    self.data.state_dir,
+                    self.data.destination,
+                    server["account_ref"],
+                    server["folder"],
+                    selected_scope,
+                    key,
+                    allow_subset=selected is not None,
+                )
+            except BackupError as error:
+                if error.code=='DB_INTEGRITY_FAILED' and error.details.get('repair_job_id'):
+                    progress(db_repair_job_id=error.details['repair_job_id'])
+                raise
             if reused:
                 progress(
                     verified_count=reused["databases_count"],
@@ -370,6 +375,7 @@ class OperatorRunner:
                 notify=notify,
                 control=control.checkpoint,
                 selected_aliases=selected,
+                resume_job_id=task.get('db_repair_job_id'),
             ).run()
 
     @staticmethod

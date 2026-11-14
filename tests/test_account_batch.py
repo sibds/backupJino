@@ -40,7 +40,8 @@ def test_completed_db_cache_requires_scope_database_set_and_local_integrity(tmp_
     try:
         completed_database_copy(tmp_path/'state',tmp_path/'out','panel-example','client-login',scope,key)
     except BackupError as exc:
-        assert exc.code=='INTEGRITY_FAILED'
+        assert exc.code=='DB_INTEGRITY_FAILED'
+        assert exc.details['repair_job_id']==job.job_id
     else:
         raise AssertionError('Corrupted SQL must not be reused')
 

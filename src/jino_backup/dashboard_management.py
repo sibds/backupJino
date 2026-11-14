@@ -153,9 +153,12 @@ class DashboardManagement:
         self.inventory.import_history(self.catalog, self.tasks(), self.data.state_dir)
         with self.lock:
             latest_files = {}
+            latest_databases = {}
             for task in self.tasks():
                 if task['kind'] == 'files': latest_files.setdefault(task['row'], task)
+                if task['kind'] == 'databases': latest_databases.setdefault(task['row'],task)
             for task in latest_files.values(): self._queue_file_resume(task['id'])
+            for task in latest_databases.values(): self._queue_database_redownload(task['id'])
             self._schedule()
 
     def task(self, task_id):
@@ -327,6 +330,8 @@ class DashboardManagement:
             snapshot = options.get("snapshot_date")
             selected = options.get('db_aliases')
             inspect_only = options.get('inspect_only', False)
+            if type(options.get('fresh_run',False)) is not bool:
+                raise BackupError('REQUEST_INVALID')
             if type(options.get('new_version', False)) is not bool or type(inspect_only) is not bool or kind != 'databases' and (selected is not None or inspect_only or options.get('new_version')):
                 raise BackupError('REQUEST_INVALID')
             if selected is not None:
@@ -356,6 +361,7 @@ class DashboardManagement:
                     and task.get('db_aliases') == selected
                     and task.get('inspect_only', False) == inspect_only
                     and not options.get('new_version', False)
+                    and not options.get('fresh_run', False)
                 ):
                     return self.action(task["id"], "resume")
                 break
@@ -407,6 +413,7 @@ class DashboardManagement:
             self._update(task_id, state=state)
             self.event(task["row"], state, kind=task["kind"], task_id=task_id)
 
+    
     def action(self, task_id, action):
         if action not in {"pause", "resume", "stop"}:
             raise BackupError("REQUEST_INVALID")
@@ -420,6 +427,8 @@ class DashboardManagement:
                     raise BackupError("SERVER_BLOCKED")
                 if server["binding_revision"] != task["revision"]:
                     raise BackupError("SERVER_CONFIG_CHANGED")
+                if task['kind']=='databases' and task.get('db_redownload_exhausted'):
+                    self._update(task_id,db_redownload_count=0,db_redownload_exhausted=False)
                 partial = task["kind"] == "files" and task["state"] == "FINISHED" and (task.get("result") or {}).get("status") == "PARTIAL"
                 automatic_wait = task['state'] == 'SCHEDULED' and task.get('auto_resume_at')
                 if not partial and not automatic_wait and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
@@ -472,7 +481,7 @@ class DashboardManagement:
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
                 continue
-            if task.get('auto_resume_at'):
+            if task.get('auto_resume_at') or task['kind']=='databases' and task.get('db_redownload_count',0)>0:
                 server = self.catalog.get(task['row'], include_deleted=True)
                 if server['blocked'] or server['deleted']:
                     self._update(task['id'], state='PAUSED', auto_resume_at=None, scheduled_at=None)
@@ -539,7 +548,7 @@ class DashboardManagement:
             for server in self.catalog.all():
                 if server['blocked'] or server['deleted'] or not server['can_check']:
                     continue
-                if any(t['kind']=='databases' and t['state'] in ACTIVE for t in self.tasks(server['row'])):
+                if any(t['kind']=='databases' and (t['state'] in ACTIVE or t['id'] in self.running) for t in self.tasks(server['row'])):
                     continue
                 for item in self.inventory.list(server['row'], server['binding_revision']):
                     schedule = item.get('schedule') or {}
@@ -756,7 +765,33 @@ class DashboardManagement:
                 )
                 self.running.discard(task_id)
                 self._queue_file_resume(task_id)
+                self._queue_database_redownload(task_id)
                 self._schedule()
+
+    def _queue_database_redownload(self,task_id):
+        task=self.task(task_id)
+        if (self.closed or task['kind']!='databases' or task['state']!='FAILED'
+                or task.get('error_code')!='DB_INTEGRITY_FAILED'): return False
+        control=self.controls.get(task_id)
+        if control and (control.stopped or control.paused): return False
+        server=self.catalog.get(task['row'],include_deleted=True)
+        if server['blocked'] or server['deleted'] or server['binding_revision']!=task['revision']: return False
+        latest=next(t for t in self.tasks(task['row']) if t['kind']=='databases')
+        if latest['id']!=task_id: return False
+        count=task.get('db_redownload_count',0)
+        if count>=3:
+            self._update(task_id,db_redownload_exhausted=True)
+            return False
+        due=time.time()+(300,900,3600)[count]
+        policy=self.access_policy.snapshot()
+        if not policy['blocked']: due=max(due,policy['next_timestamp'])
+        when=iso_time(due)
+        self._update(task_id,state='SCHEDULED',stage='DB_REDOWNLOAD_WAIT',scheduled_at=when,next_at=when,
+                     db_redownload_count=count+1,db_redownload_exhausted=False,
+                     last_attempt_result=task.get('result'),result=None,error_code=None)
+        self.controls[task_id]=TaskControl(lambda state:self._control_state(task_id,state))
+        self.event(task['row'],'DB_REDOWNLOAD_WAIT',kind='databases',code='DB_INTEGRITY_FAILED',task_id=task_id)
+        return True
 
     def _queue_file_resume(self, task_id):
         task = self.task(task_id)
@@ -793,6 +828,10 @@ class DashboardManagement:
     def progress(self, task_id, values):
         with self.lock:
             task = self.task(task_id)
+            import re
+            repair=values.get('db_repair_job_id')
+            if isinstance(repair,str) and re.fullmatch('panel-job-[a-f0-9]{24}',repair):
+                self._update(task_id,db_repair_job_id=repair)
             progress = dict(task["progress"])
             for key in (
                 'metadata_mlst_checks',

@@ -37,7 +37,8 @@ def atomic_bytes(path, value):
 class PanelExportJob:
     def __init__(self, state_dir, destination, account_ref, idempotency_key,
                  snapshot_date, key, panel_factory, *, timeout_seconds=300,
-                 max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None):
+                 max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None,
+                 resume_job_id=None):
         try:
             if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
                 raise ValueError
@@ -50,6 +51,10 @@ class PanelExportJob:
         self.root = Path(state_dir).resolve() / 'panel_jobs'
         safe_id(account_ref)
         self.job_id = identity('panel-job', account_ref, idempotency_key)
+        if resume_job_id is not None:
+            if not isinstance(resume_job_id,str) or not re.fullmatch('panel-job-[a-f0-9]{24}',resume_job_id):
+                raise BackupError('REQUEST_INVALID')
+            self.job_id=resume_job_id
         self.destination=Path(destination).absolute()
         self.server_id=account_ref.replace('panel-','server-',1)
         self.server_folder=server_folder
@@ -111,7 +116,7 @@ class PanelExportJob:
 
     def _public(self, status, **details):
         artifacts = [entry['artifact'] for entry in self.state['databases'].values()
-                     if entry.get('artifact')]
+                     if entry.get('artifact') and entry['artifact'].get('validation')=='PASS']
         return {'job_id':self.job_id,'account_ref':self.account_ref,'status':status,
                 'test_passed':status=='DB_ONLY','source_snapshot_at':None,
                 'source_snapshot_date':self.snapshot_date,'snapshot_time_precision':'day',
@@ -125,8 +130,33 @@ class PanelExportJob:
     def _verify_local(self, artifact):
         file = local_path(self.output,artifact['relative_path'])
         if not file.is_file() or file.stat().st_size != artifact['size_bytes'] or sha256_file(file) != artifact['sha256']:
-            raise BackupError('INTEGRITY_FAILED')
+            raise BackupError('DB_INTEGRITY_FAILED')
         validate_sql(file)
+
+    def _prepare_redownload(self, entry):
+        if self.cleanup_remote or not entry.get('remote'):
+            raise BackupError('DB_INTEGRITY_FAILED')
+        artifact=entry.pop('artifact')
+        target=local_path(self.output,artifact['relative_path'])
+        entry['invalid_artifact']=artifact
+        entry['replacement_baseline']=({'size':target.stat().st_size,'sha256':sha256_file(target)}
+                                       if target.is_file() else None)
+        entry['replace_corrupt']=True
+        entry['phase']='WAITING'
+        self.state['phase']='CREATED'
+        self._save()
+
+    def _verify_or_prepare_redownload(self, entry):
+        if entry['artifact'].get('validation')!='PASS':
+            self._prepare_redownload(entry)
+            return False
+        try:
+            self._verify_local(entry['artifact'])
+            return True
+        except BackupError as error:
+            if error.code!='DB_INTEGRITY_FAILED': raise
+            self._prepare_redownload(entry)
+            return False
 
     def _prepare_output(self):
         marker = self.output / '.jino-panel-owner.json'
@@ -149,12 +179,14 @@ class PanelExportJob:
             self._load()
             try:
                 if self.state['phase']=='DB_ONLY':
+                    all_valid=True
                     for entry in self.state['databases'].values():
-                        self._verify_local(entry['artifact'])
-                    result = self._public('DB_ONLY',already_finished=True,cleanup_verified=self.cleanup_remote)
-                    write_json(self.report_path,result)
-                    self._event('ALREADY_VERIFIED')
-                    return result
+                        if not self._verify_or_prepare_redownload(entry): all_valid=False
+                    if all_valid:
+                        result = self._public('DB_ONLY',already_finished=True,cleanup_verified=self.cleanup_remote)
+                        write_json(self.report_path,result)
+                        self._event('ALREADY_VERIFIED')
+                        return result
                 self._event('AUTHENTICATE')
                 with self.panel_factory() as panel:
                     self._event('INSPECT_SNAPSHOT')
@@ -203,8 +235,7 @@ class PanelExportJob:
                         self.control()
                         entry = self.state['databases'].setdefault(alias,{'name':name,'phase':'NEW'})
                         if entry.get('phase') in {'CLEANED','RETAINED'}:
-                            self._verify_local(entry['artifact'])
-                            continue
+                            if self._verify_or_prepare_redownload(entry): continue
                         self._export_one(panel,scope,alias,entry)
                     if (len(self.state['databases']) != len(names)
                             or any(x['phase'] not in {'CLEANED','RETAINED'} or not x.get('artifact') for x in self.state['databases'].values())):
@@ -278,6 +309,11 @@ class PanelExportJob:
                     self._event('EXPORT_RESPONSE_UNKNOWN',db_alias=alias)
             if entry['phase'] in {'SUBMITTING','WAITING','DOWNLOADED'}:
                 self._event('EXPORT_WAIT',db_alias=alias)
+                if remote is not None and not self.cleanup_remote and entry.get('download_attempt',0)>1 and not entry.get('artifact'):
+                    refreshed=panel.wait_export(scope,entry['name'],self.timeout_seconds)
+                    if not refreshed or refreshed.get('path')!=remote.get('path'):
+                        raise BackupError('EXPORT_RESULT_UNVERIFIED')
+                    remote=refreshed
                 remote = remote or panel.wait_export(scope,entry['name'],self.timeout_seconds)
                 if remote is None:
                     raise BackupError('EXPORT_RESULT_UNKNOWN')
@@ -285,15 +321,19 @@ class PanelExportJob:
                 entry['phase']='WAITING'
                 self._save()
                 if entry.get('pending_artifact') and target.exists() and not entry.get('artifact'):
-                    self._verify_local(entry['pending_artifact'])
-                    entry['artifact']=entry.pop('pending_artifact')
-                    entry['phase']='DOWNLOADED'
-                    self._save()
-                    self._event('LOCAL_COMMIT_RECOVERED',db_alias=alias)
+                    try:
+                        self._verify_local(entry['pending_artifact'])
+                    except BackupError as error:
+                        if not entry.get('replace_corrupt') or error.code!='DB_INTEGRITY_FAILED': raise
+                    else:
+                        entry['artifact']=entry.pop('pending_artifact')
+                        entry['phase']='DOWNLOADED'
+                        self._save()
+                        self._event('LOCAL_COMMIT_RECOVERED',db_alias=alias)
                 if not entry.get('artifact'):
                     self.control()
                     self._event('DOWNLOAD',db_alias=alias)
-                    if target.exists():
+                    if target.exists() and not entry.get('replace_corrupt'):
                         raise BackupError('LOCAL_DESTINATION_CONFLICT')
                     reusable=None
                     for candidate in sorted(partial.parent.glob(alias+'.sql.partial-*')):
@@ -322,15 +362,29 @@ class PanelExportJob:
                               'validation':'PASS'}
                     entry['pending_artifact']=artifact
                     self._save()  # Recover a crash between final rename and journal commit.
+                    if entry.get('replace_corrupt'):
+                        baseline=entry.get('replacement_baseline')
+                        if target.exists() and (not baseline or not target.is_file()
+                                or target.stat().st_size!=baseline['size'] or sha256_file(target)!=baseline['sha256']):
+                            raise BackupError('LOCAL_DESTINATION_CONFLICT')
                     replace_with_retry(partial,target)
                     entry['artifact']=artifact
                     entry.pop('pending_artifact',None)
                     entry['phase']='DOWNLOADED'
                     self._save()
                     self._verify_local(artifact)
+                    entry.pop('invalid_artifact',None)
+                    entry.pop('replacement_baseline',None)
+                    entry.pop('replace_corrupt',None)
+                    self._save()
                     self._event('SQL_VERIFIED',db_alias=alias,size_bytes=artifact['size_bytes'],sha256=artifact['sha256'])
                 else:
                     self._verify_local(entry['artifact'])
+        except BackupError as error:
+            if error.code=='DB_INTEGRITY_FAILED' and entry.get('artifact'):
+                entry['artifact']['validation']='FAIL'
+                self._save()
+            raise
         finally:
             if self.cleanup_remote:
                 partial.unlink(missing_ok=True)
