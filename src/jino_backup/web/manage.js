@@ -50,6 +50,7 @@
     EXPORT_WAIT: "Ожидание SQL-файла",
     DOWNLOAD: "Скачивание SQL",
     SQL_VERIFIED: "Дамп проверен",
+    SQL_WARNING: "Предупреждение: дамп не содержит объектов БД",
     DB_ONLY: "Дампы проверены",
     REMOTE_EXPORT_RETAINED: "SQL на хостинге сохранён",
     SNAPSHOT_SELECTED: "Снимок выбран",
@@ -410,6 +411,8 @@
         fragment.append(node('p',task.db_redownload_exhausted?'notice danger':'notice warning',
           task.db_redownload_exhausted ? 'Три повтора скачивания исчерпаны. Повреждённый файл сохранён. Проверьте SQL на сервере; затем можно продолжить вручную.' :
           'Повторное скачивание дампа: '+task.db_redownload_count+' из 3. Повреждённая версия остаётся до проверки и замены. Допуск панели сохраняется.'));
+      if (kind==='databases' && task?.result?.warnings?.includes('SQL_NO_OBJECTS'))
+        fragment.append(node('p','notice warning','Дамп завершён, но не содержит объектов БД. Проверьте, что база действительно пустая. Остальные БД обработаны в обычном порядке.'));
       if (kind === 'databases' && task?.inspect_only) fragment.append(node('p','helper','Только чтение списка БД из Jino. SQL не заказывается.'));
       const controls = node("div", "job-controls");
       const active = task && activeStates.includes(task.state);
@@ -1127,6 +1130,8 @@
         copy.saved ? 'Скачано · проверено' : 'Нет проверенной копии'));
       const nameGroup = node('div','database-name-group'); nameGroup.append(checkbox,name);
       info.append(nameGroup);
+      if (item.warnings?.includes('SQL_NO_OBJECTS'))
+        info.append(node('span','database-copy-state warning','Дамп без объектов. Проверьте, что БД пустая.'));
       const size = node('td','database-size', copy.saved && Number.isSafeInteger(item.size_bytes) && item.size_bytes >= 0 ? bytes(item.size_bytes) : copy.saved ? 'Неизвестен' : '—');
       size.dataset.label = 'Размер копии';
       const downloaded = node('td','database-downloaded'); downloaded.dataset.label = 'Скачано';

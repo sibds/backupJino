@@ -57,13 +57,14 @@ class DatabaseInventory:
             self._update(row, revision, identity('db', account, name), name=name,
                          **({'available_snapshot_date':snapshot} if snapshot else {}))
 
-    def verified(self, row, revision, alias, snapshot, downloaded_at, size):
+    def verified(self, row, revision, alias, snapshot, downloaded_at, size, *, warnings=None):
         item = next((x for x in self.list(row, revision) if x['db_alias']==alias), None)
         if item and item.get('downloaded_at') and downloaded_at is None:
             return
         if item and (not item.get('downloaded_at') or downloaded_at >= item['downloaded_at']):
             self._update(row, revision, alias, snapshot_date=snapshot, downloaded_at=downloaded_at,
-                         size_bytes=size, validation='PASS')
+                         size_bytes=size, validation='PASS',
+                         warnings=['SQL_NO_OBJECTS'] if 'SQL_NO_OBJECTS' in (warnings or []) else [])
 
     def schedule(self, row, revision, payload):
         if self.cipher is None:
@@ -139,6 +140,6 @@ class DatabaseInventory:
                     artifact = entry.get('artifact') or {}
                     if artifact.get('validation') == 'PASS':
                         self.verified(task['row'], task['revision'], alias, scope.get('snapshot_date'),
-                                      times.get(alias), artifact['size_bytes'])
+                                      times.get(alias), artifact['size_bytes'],warnings=artifact.get('warnings'))
             except (OSError, ValueError, InvalidToken, KeyError):
                 continue

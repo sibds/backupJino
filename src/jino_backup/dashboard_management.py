@@ -214,6 +214,9 @@ class DashboardManagement:
                 event[key] = details[key]
         if isinstance(details.get("current_file"), str):
             event["file"] = details["current_file"][:300]
+        if details.get('warning_code')=='SQL_NO_OBJECTS':
+            event['warning_code']='SQL_NO_OBJECTS'
+            event['level']='warning'
         if isinstance(details.get("retry_at"), str):
             event["retry_at"] = details["retry_at"]
         if isinstance(details.get("directory"), str):
@@ -923,7 +926,7 @@ class DashboardManagement:
                     **progress,
                     **{key: values[key] for key in ("skipped_path", "skip_reason", "skipped_kind") if key in values},
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
-                       "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action') if key in values},
+                       "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code') if key in values},
                 )
 
     def close(self):

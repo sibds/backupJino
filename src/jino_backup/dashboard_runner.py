@@ -346,16 +346,21 @@ class OperatorRunner:
             progress(workflow_key=workflow_key)
             verified = 0
             received = 0
+            sql_warnings = {}
 
             def notify(event):
                 nonlocal verified, received
+                if event['stage']=='SQL_WARNING':
+                    sql_warnings.setdefault(event['db_alias'],[]).append(event['warning_code'])
                 if event["stage"] == "SQL_VERIFIED":
                     verified += 1
                     received += event["size_bytes"]
                     if inventory:
                         inventory.verified(server['row'], server['binding_revision'], event['db_alias'],
-                                           snapshot, event['time'], event['size_bytes'])
-                progress(stage=event["stage"], verified_count=verified, received_bytes=received)
+                                           snapshot, event['time'], event['size_bytes'],
+                                           warnings=sql_warnings.get(event['db_alias']))
+                progress(stage=event["stage"], verified_count=verified, received_bytes=received,
+                         **({'warning_code':event['warning_code']} if event.get('warning_code') else {}))
 
             panel.download_progress = lambda amount, total: progress(
                 received_bytes=received + amount,

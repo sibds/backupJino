@@ -117,10 +117,12 @@ class PanelExportJob:
     def _public(self, status, **details):
         artifacts = [entry['artifact'] for entry in self.state['databases'].values()
                      if entry.get('artifact') and entry['artifact'].get('validation')=='PASS']
+        warnings=sorted({warning for artifact in artifacts for warning in artifact.get('warnings',[])})
         return {'job_id':self.job_id,'account_ref':self.account_ref,'status':status,
                 'test_passed':status=='DB_ONLY','source_snapshot_at':None,
                 'source_snapshot_date':self.snapshot_date,'snapshot_time_precision':'day',
                 'databases_count':len(artifacts),'artifacts':artifacts,
+                **({'warnings':warnings} if warnings else {}),
                 'application_restore_tested':False,'files_included':False,
                 'cleanup_policy':'DELETE_OWNED' if self.cleanup_remote else 'KEEP_REMOTE',
                 'remote_exports_retained':sum(bool(x.get('remote')) for x in self.state['databases'].values()) if not self.cleanup_remote else 0,
@@ -131,7 +133,10 @@ class PanelExportJob:
         file = local_path(self.output,artifact['relative_path'])
         if not file.is_file() or file.stat().st_size != artifact['size_bytes'] or sha256_file(file) != artifact['sha256']:
             raise BackupError('DB_INTEGRITY_FAILED')
-        validate_sql(file)
+        warnings=validate_sql(file) or []
+        if warnings:
+            artifact['warnings']=warnings
+        return warnings
 
     def _prepare_redownload(self, entry):
         if self.cleanup_remote or not entry.get('remote'):
@@ -245,7 +250,7 @@ class PanelExportJob:
                 result = self._public('DB_ONLY',cleanup_verified=self.cleanup_remote,transport=scope['transport'])
                 write_json(local_path(self.output,'manifest.json'),{
                     'schema_version':'1.0',**result,'capture_consistency':'PROVIDER_SNAPSHOT',
-                    'encrypted':False,'warnings':['FILES_NOT_INCLUDED','RESTORE_NOT_TESTED']})
+                    'encrypted':False,'warnings':result.get('warnings',[])+['FILES_NOT_INCLUDED','RESTORE_NOT_TESTED']})
                 write_json(self.report_path,result)
                 self._event('DB_ONLY',databases_count=result['databases_count'])
                 return result
@@ -356,10 +361,12 @@ class PanelExportJob:
                         panel.download(scope,remote,partial,self.max_bytes)
                     if not partial.is_file() or not 0 < partial.stat().st_size <= self.max_bytes:
                         raise BackupError('DB_EXPORT_LIMIT_EXCEEDED')
-                    validate_sql(partial)
+                    warnings=validate_sql(partial) or []
                     artifact={'db_alias':alias,'relative_path':'databases/'+alias+'.sql',
                               'size_bytes':partial.stat().st_size,'sha256':sha256_file(partial),
                               'validation':'PASS'}
+                    if warnings:
+                        artifact['warnings']=warnings
                     entry['pending_artifact']=artifact
                     self._save()  # Recover a crash between final rename and journal commit.
                     if entry.get('replace_corrupt'):
@@ -377,6 +384,8 @@ class PanelExportJob:
                     entry.pop('replacement_baseline',None)
                     entry.pop('replace_corrupt',None)
                     self._save()
+                    for warning in artifact.get('warnings',[]):
+                        self._event('SQL_WARNING',db_alias=alias,warning_code=warning)
                     self._event('SQL_VERIFIED',db_alias=alias,size_bytes=artifact['size_bytes'],sha256=artifact['sha256'])
                 else:
                     self._verify_local(entry['artifact'])

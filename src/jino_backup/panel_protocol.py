@@ -14,6 +14,47 @@ TOKEN_QUERY='''mutation CreateFiletransferToken($serviceName: String, $objectId:
 }'''
 
 
+def _session_only_sql(data, settings):
+    """Recognize a completed small session envelope, never arbitrary SQL."""
+    lines=data.strip().splitlines()
+    if not lines or not re.fullmatch(rb'/\*![0-9]+ SET SQL_NOTES=@OLD_SQL_NOTES \*/;',lines[-1]):
+        return False
+    required=[name for name in settings if name!='UNIQUE_CHECKS']
+    for name in settings:
+        saved=('@OLD_'+name+'=').encode() in data
+        restored=(name+'=@OLD_'+name).encode() in data
+        if saved!=restored or (name in required and not saved):
+            return False
+    allowed={name.encode() for name in settings}
+    allowed.update(b'@OLD_'+name.encode() for name in settings)
+    for line in lines:
+        line=line.strip()
+        if not line:
+            continue
+        if line.startswith(b'--'):
+            if re.match(rb'--\s*(?:ERROR\b|Got error\b|mysqldump:|mariadb-dump:)',line,re.I):
+                return False
+            continue
+        if line.rstrip(b';')==b'/*M!999999\\- enable the sandbox mode */':
+            continue
+        match=re.fullmatch(rb'/\*![0-9]+ SET ([^;\r\n]+) \*/;',line)
+        if not match:
+            return False
+        statement=match[1]
+        if statement.startswith(b'NAMES '):
+            if not re.fullmatch(rb'NAMES [A-Za-z0-9_]+',statement):
+                return False
+        else:
+            # Several session assignments may share a versioned SET comment.
+            for assignment in statement.split(b','):
+                pair=assignment.strip().split(b'=',1)
+                if len(pair)!=2 or pair[0].strip() not in allowed:
+                    return False
+                if not re.fullmatch(rb"(?:@@[A-Z_]+|@OLD_[A-Z_]+|[0-9]+|'[^'<>;]*')",pair[1].strip()):
+                    return False
+    return True
+
+
 def validate_panel_sql(path):
     path=Path(path)
     size=path.stat().st_size
@@ -25,6 +66,8 @@ def validate_panel_sql(path):
         return
     settings=('CHARACTER_SET_CLIENT','CHARACTER_SET_RESULTS','COLLATION_CONNECTION','TIME_ZONE',
               'UNIQUE_CHECKS','FOREIGN_KEY_CHECKS','SQL_MODE','SQL_NOTES')
+    if size<=65536 and _session_only_sql(path.read_bytes(),settings):
+        return ['SQL_NO_OBJECTS']
     if (not head.lstrip().startswith((b'/*!',b'/*M!'))
             or not all(('@OLD_'+n+'=').encode() in head and (n+'=@OLD_'+n).encode() in tail for n in settings)
             or not tail.rstrip().splitlines()

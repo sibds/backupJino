@@ -74,14 +74,16 @@ def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*
             if not file.is_file() or file.stat().st_size!=artifact['size_bytes'] or sha256_file(file)!=artifact['sha256']:
                 raise BackupError('DB_INTEGRITY_FAILED',repair_job_id=path.stem)
             try:
-                validate_panel_sql(file)
+                warnings=validate_panel_sql(file) or []
             except BackupError as error:
                 if error.code=='DB_INTEGRITY_FAILED':
                     raise BackupError('DB_INTEGRITY_FAILED',repair_job_id=path.stem) from None
                 raise
-            artifacts.append(artifact)
+            artifacts.append({**artifact,**({'warnings':warnings} if warnings else {})})
+        warnings=sorted({w for a in artifacts for w in a.get('warnings',[])})
         return {'status':'DB_ONLY','job_id':path.stem,'databases_count':len(artifacts),
-                'artifacts':artifacts,'source_snapshot_date':scope['snapshot_date'],'reused_existing':True}
+                'artifacts':artifacts,**({'warnings':warnings} if warnings else {}),
+                'source_snapshot_date':scope['snapshot_date'],'reused_existing':True}
     return None
 
 
