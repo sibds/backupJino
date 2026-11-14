@@ -13,10 +13,12 @@
     },
     {
       "file": "work-plan.png",
-      "width": 1600,
-      "height": 3043,
-      "sha256": "33a08ec55e3b5aa82555fa9402a598eb2f9b607466c817b374d1bed88eba6fc3",
-      "changed": true
+      "width": 1440,
+      "height": 2229,
+      "sha256": "ded5d1a36677d24aaa3048fd0442aeb5bcf762c158fa45a29510de24e595bbe3",
+      "changed": true,
+      "captured_at": "2026-11-14T19:56:23.097110+00:00",
+      "generator": "scripts/check_work_plan.py"
     },
     {
       "file": "database-catalog.png",
