@@ -1,45 +1,45 @@
-{
-  "captured_at": "2026-11-14T00:14:51.371109+00:00",
-  "synthetic_only": true,
-  "command": ".venv/Scripts/python.exe scripts/capture_readme_screenshot.py --all",
-  "customer_data_read": false,
-  "screenshots": [
-    {
-      "file": "dashboard.png",
-      "width": 1600,
-      "height": 1640,
-      "sha256": "1f9e9961db187f9c7660f1dc8e11d1fd1851a6dcf29647c4b9dcf0e1f446acc5",
-      "changed": true
-    },
-    {
-      "file": "work-plan.png",
-      "width": 1440,
-      "height": 2229,
-      "sha256": "ded5d1a36677d24aaa3048fd0442aeb5bcf762c158fa45a29510de24e595bbe3",
-      "changed": true,
-      "captured_at": "2026-11-14T19:56:23.097110+00:00",
-      "generator": "scripts/check_work_plan.py"
-    },
-    {
-      "file": "database-catalog.png",
-      "width": 1440,
-      "height": 1495,
-      "sha256": "033dc4241831c6ba7ad39408e033f598bcc2f362102715eb82996032506c87ca",
-      "changed": true
-    },
-    {
-      "file": "database-schedule.png",
-      "width": 1440,
-      "height": 1715,
-      "sha256": "beb24f18c7cfb3133a4a26bdeff018ffe9d22efc1fe44b0d6915132e87d003f2",
-      "changed": true
-    },
-    {
-      "file": "database-mobile.png",
-      "width": 390,
-      "height": 3556,
-      "sha256": "23ff6cc879fdcf260ca1c03bc359c0c5a3c69a6a3c6a2fe4ecf3f02763fb62ef",
-      "changed": true
-    }
-  ]
+﻿{
+    "captured_at":  "2026-11-14T00:14:51.371109+00:00",
+    "synthetic_only":  true,
+    "command":  ".venv/Scripts/python.exe scripts/capture_readme_screenshot.py --all",
+    "customer_data_read":  false,
+    "screenshots":  [
+                        {
+                            "file":  "dashboard.png",
+                            "width":  1600,
+                            "height":  1640,
+                            "sha256":  "1c0b88d6f00031dc1dbfc1791e5a084d9b929d5d93f4496ffe264aaa496f32ac",
+                            "changed":  true
+                        },
+                        {
+                            "file":  "work-plan.png",
+                            "width":  1440,
+                            "height":  2823,
+                            "sha256":  "4ad9a6ea99b46dc39c8192d069a18c29a977d771aa62eafc25c7153f1b198a4f",
+                            "changed":  true,
+                            "captured_at":  "2026-11-14T21:35:18.745430+00:00",
+                            "generator":  "scripts/check_work_plan.py"
+                        },
+                        {
+                            "file":  "database-catalog.png",
+                            "width":  1440,
+                            "height":  1495,
+                            "sha256":  "8dad604b5873262bd4081eeaa9b304a87bd464cd9edd29b4a433f10b567db862",
+                            "changed":  true
+                        },
+                        {
+                            "file":  "database-schedule.png",
+                            "width":  1440,
+                            "height":  1715,
+                            "sha256":  "cbde0243c52c9d1c7aa9e6c1c2cb0c62a3dff433230eceb5e40e210eaebaaf2b",
+                            "changed":  true
+                        },
+                        {
+                            "file":  "database-mobile.png",
+                            "width":  390,
+                            "height":  3556,
+                            "sha256":  "41cd1ddd8fedc113bf215191a7d4247be6b01ba84faa1edd06bc210fd8eb6d58",
+                            "changed":  true
+                        }
+                    ]
 }
