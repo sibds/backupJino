@@ -21,7 +21,7 @@
 
   function note(value, error = false) {
     text("plan-message", value);
-    $("plan-message").className = "notice " + (error ? "danger" : "warning");
+    $("plan-message").className = "notice" + (error ? " danger" : "");
     $("plan-message").hidden = !value;
   }
 
@@ -291,6 +291,7 @@
   function render() {
     const focused = document.activeElement?.dataset.focusKey;
     expandedTasks=new Set([...document.querySelectorAll('#plan-view .plan-task-more[open]')].map(el=>el.closest('[data-task-id]').dataset.taskId));
+    populateServers();
     renderSelectionSummary();
     $("resume-panel-queue").disabled = pending;
     if (!plan) return;
@@ -358,22 +359,47 @@
   function populateServers() {
     if (!state.data) return;
     const visible=visibleServers();
-    const signature=JSON.stringify([visible.map(s=>[s.row,s.name,s.login,s.blocked,s.status,s.configuration?.revision]),[...selectedServers],$('plan-files').checked,$('plan-databases').checked,pending]);
+    const signature=JSON.stringify([visible.map(s=>[s.row,s.name,s.login,s.blocked,s.status,s.configuration?.revision]),[...selectedServers],$('plan-files').checked,$('plan-databases').checked,pending,
+      plan?.pending.map(t=>[t.row,t.kind,t.state]),plan?.rules]);
     if (signature === serverSignature) return;
     serverSignature = signature;
     const focus=document.activeElement?.dataset.planRow;
     const fragment = document.createDocumentFragment();
     for (const server of visible) {
-      const row=node('label','plan-server-choice');
+      const row=node('tr','plan-server-choice');
+      const identity=node('td','plan-server-identity');
+      const group=node('div','database-name-group');
       const checkbox=node('input');checkbox.type='checkbox';checkbox.dataset.planRow=server.row;
       checkbox.checked=selectedServers.has(server.row);checkbox.disabled=pending||!eligible(server)&&!checkbox.checked;
       checkbox.setAttribute('aria-label','Выбрать сервер '+server.name);
       checkbox.addEventListener('change',()=>{checkbox.checked?selectedServers.add(server.row):selectedServers.delete(server.row);populateServers();renderSelectionSummary();});
-      const name=node('span','plan-server-title');name.append(node('strong','',server.name),node('span','secondary-text',server.login));
-      row.append(checkbox,name,node('span','plan-server-state',server.blocked?'Заблокирован':!eligible(server)?'Нет нужного доступа':labels[server.status]||statuses[server.status]?.[0]||'Готов к планированию'));
+      const name=node('span','plan-server-title');
+      const link=node('a','',server.name);link.href='#server/'+server.row;
+      name.append(link,node('span','secondary-text',server.login));
+      if (server.blocked||!eligible(server)) name.append(node('span','plan-access-warning',server.blocked?'Заблокирован':'Нет доступа для выбранного состава копии'));
+      group.append(checkbox,name);identity.append(group);
+      const work=node('td','plan-server-work');work.dataset.label='Текущая работа';
+      const tasks=(plan?.pending||[]).filter(t=>t.row===server.row);
+      for (const task of tasks) work.append(node('p','',(task.kind==='files'?'Файлы':'БД')+' · '+(labels[task.state]||task.state)));
+      if (!tasks.length) work.append(node('span','secondary-text','Нет активных заданий'));
+      const schedule=node('td','plan-server-schedule');schedule.dataset.label='Расписание';
+      const rules=(plan?.rules||[]).filter(r=>r.row===server.row);
+      for (const rule of rules) {
+        schedule.append(node('p',rule.stale||rule.blocked?'plan-access-warning':!rule.enabled?'secondary-text':'',
+          (rule.kind==='files'?'Файлы':'БД')+' · '+(rule.stale?'Привязка изменилась':rule.blocked?'Заблокировано':!rule.enabled?'Выключено':intervalLabel(rule.every_hours))));
+      }
+      if (!rules.length) schedule.append(node('span','secondary-text','Не настроено'));
+      row.append(identity,work,schedule);
+      row.addEventListener('click',event=>{
+        if (event.target.closest('a,input,button,label')||checkbox.disabled) return;
+        checkbox.checked=!checkbox.checked;checkbox.dispatchEvent(new Event('change'));
+      });
       fragment.append(row);
     }
-    if (!visible.length) fragment.append(node('p','plan-empty','Серверы не найдены. Измените запрос поиска.'));
+    if (!visible.length) {
+      const row=node('tr');const empty=node('td','plan-empty','Серверы не найдены. Измените запрос поиска.');
+      empty.colSpan=3;row.append(empty);fragment.append(row);
+    }
     $('plan-servers').replaceChildren(fragment);
     if (focus) $('plan-servers').querySelector('[data-plan-row="'+focus+'"]')?.focus({preventScroll:true});
     renderSelectionSummary();
@@ -390,11 +416,16 @@
     const kinds=Number($('plan-files').checked)+Number($('plan-databases').checked);
     const valid=selectedServers.size>0 && kinds>0 && [...selectedServers].every(row=>{const s=state.data?.servers.find(s=>s.row===row);return s&&eligible(s);});
     text('plan-selected-count','Выбрано '+selectedServers.size);
+    const visibleCount=visibleServers().length;
+    text('plan-filter-count','Показано '+visibleCount+' из '+(state.data?.servers.length||0));
     const plural=(n,forms)=>forms[n%100>=11&&n%100<=14?2:n%10===1?0:n%10>=2&&n%10<=4?1:2];
     const total=selectedServers.size*kinds;
     text('plan-bulk-summary',!selectedServers.size?'Выберите хотя бы один сервер':!kinds?'Выберите файлы или БД':!valid?'В выборе есть сервер без нужного доступа. Снимите его выбор.':selectedServers.size+' '+plural(selectedServers.size,['сервер','сервера','серверов'])+' · '+(kinds===2?'файлы и БД':$('plan-files').checked?'файлы':'БД')+' · '+total+' '+plural(total,['отдельное задание','отдельных задания','отдельных заданий']));
     $('plan-submit').disabled=pending||!valid;
-    $('plan-submit').textContent=$('plan-repeat').value?'Сохранить расписание':'Добавить в очередь';
+    $('plan-submit').textContent=pending?'Сохраняем…':$('plan-repeat').value?'Сохранить расписание':'Добавить в очередь';
+    text('plan-timing-note',$('plan-repeat').value
+      ? 'Без даты — первая постановка сейчас, затем через выбранный интервал. Начало зависит от свободных слотов и допуска Jino.'
+      : 'Без даты — поставить сейчас. Начало зависит от свободных слотов и допуска Jino.');
     $('plan-apply-action').disabled=pending||!selectedServers.size||!kinds;
     $('plan-clear').disabled=pending||!selectedServers.size;
     const visible=visibleServers().filter(eligible);

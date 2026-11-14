@@ -2053,28 +2053,50 @@ body.plan-mode .server-summary, body.plan-mode .overall-progress { display: none
 body.plan-mode #add-server, body.plan-mode #check-all { display: none; }
 #plan-view { font-variant-numeric: tabular-nums; }
 #plan-view .plan-overview { color: var(--secondary); margin: 0 0 20px; }
-#plan-view .plan-builder { grid-template-columns: minmax(0,1.1fr) minmax(0,1fr); gap: 0; padding: 0; overflow: clip; }
-#plan-view .plan-picker, #plan-view .plan-settings { min-width: 0; padding: 24px; }
-#plan-view .plan-picker { border-right: 1px solid var(--line); }
+#plan-view .plan-builder { padding: 24px; margin-bottom: 22px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); min-width: 0; }
 #plan-view .plan-heading { margin: 0 0 16px; }
-#plan-view .plan-settings h2 { margin: 0 0 20px; }
-#plan-view .plan-settings > label { margin: 16px 0; }
-#plan-view .plan-servers { max-height: 340px; overflow-y: auto; scrollbar-color: var(--field-line, #cbd6e3) transparent; }
-#plan-view .plan-selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; }
-#plan-view label.plan-check, #plan-view .plan-server-choice { display: flex; align-items: center; gap: 12px; min-height: 44px; cursor: pointer; }
+#plan-view .plan-heading .helper { margin: 6px 0 0; }
+#plan-view .plan-filters { margin-top: 18px; }
+#plan-view .plan-settings { min-width: 0; }
+#plan-view .plan-settings h3, #plan-view .plan-group-actions h3 { font-size: 14px; margin: 0 0 8px; }
+#plan-view .plan-settings .helper { margin: 8px 0; max-width: 75ch; }
+#plan-view .plan-schedule-fields { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) minmax(0,.7fr); gap: 16px; }
+#plan-view .plan-schedule-fields label { min-width: 0; }
+#plan-view label.plan-check { display: flex; align-items: center; gap: 12px; min-height: 44px; cursor: pointer; font-size: 13px; }
 #plan-view input[type="checkbox"] { width: 18px; height: 18px; min-height: 18px; flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
-#plan-view .plan-server-choice { padding: 12px 4px; border-top: 1px solid var(--line); }
+#plan-view .plan-selection { margin-bottom: 20px; }
+#plan-selected-count { font-size: 13px; }
+#plan-view .plan-servers-scroll { max-height: 392px; overflow-y: auto; scrollbar-color: var(--field-line) var(--surface); }
+#plan-view .plan-server-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
+#plan-view .plan-server-table th { position: sticky; top: 0; z-index: 1; padding: 12px 10px; color: var(--secondary); background: var(--surface); font-size: 12px; text-align: left; white-space: normal; }
+#plan-view .plan-server-table th:first-child { width: 40%; }
+#plan-view .plan-server-table th:nth-child(2) { width: 30%; }
+#plan-view .plan-server-table td { padding: 16px 10px; vertical-align: top; border-bottom: 1px solid var(--line); white-space: normal; overflow-wrap: anywhere; }
+#plan-view .plan-server-table td p { margin: 0 0 5px; }
+#plan-view .plan-server-table td p:last-child { margin-bottom: 0; }
+#plan-view .plan-server-choice { cursor: pointer; }
+#plan-view .plan-server-choice:hover { background: var(--canvas); }
 #plan-view .plan-server-choice:has(input:checked) { background: var(--accent-soft); }
+#plan-view .plan-server-choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+#plan-view .plan-server-identity .database-name-group { align-items: flex-start; min-height: 44px; }
+#plan-view .plan-server-identity input { margin-top: 3px; cursor: pointer; }
 #plan-view .plan-server-title { display: grid; gap: 4px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
-#plan-view .plan-server-title strong { font-size: 14px; font-weight: 600; }
-#plan-view .plan-server-state { font-size: 12px; color: var(--secondary); max-width: 130px; text-align: right; }
+#plan-view .plan-server-title a { font-size: 14px; font-weight: 600; color: var(--text); text-decoration: none; }
+#plan-view .plan-server-title a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+#plan-view .plan-server-title .secondary-text { font-size: 12px; }
+#plan-view .plan-access-warning { color: var(--warn); font-size: 12px; }
 #plan-view .plan-copy-kinds { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; column-gap: 24px; }
 #plan-view .plan-copy-kinds legend { font-size: 12px; color: var(--secondary); margin-bottom: 4px; }
-#plan-view .plan-time-options { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(0,1fr); gap: 16px; margin-top: 16px; }
-#plan-view .plan-bulk-summary { margin: 20px 0 12px; font-weight: 600; }
-#plan-submit { width: 100%; }
-#plan-view .plan-group-actions { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px; display: flex; align-items: end; gap: 12px; }
-#plan-view .plan-group-actions label { flex: 1; min-width: 0; }
+#plan-view .plan-settings-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-top: 16px; }
+#plan-view .plan-settings-actions .button { min-height: 44px; }
+#plan-view .plan-bulk-summary { margin: 0; font-weight: 600; font-size: 13px; }
+#plan-view #plan-message:not(.danger) { background: var(--accent-soft); color: var(--accent); margin-bottom: 16px; }
+#plan-view .plan-group-actions { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+#plan-view .plan-group-actions > div { flex: 1 1 240px; }
+#plan-view .plan-group-actions .helper { margin: 0; }
+#plan-view .plan-group-actions label { display: grid; gap: 7px; color: var(--secondary); font-size: 12px; }
+#plan-view .plan-group-actions select { min-height: 44px; max-width: 100%; padding: 9px 11px; border: 1px solid var(--field-line); border-radius: 6px; color: var(--text); background: var(--surface); font: inherit; font-size: 14px; }
+#plan-view .plan-group-actions button { min-height: 44px; }
 #plan-view .panel-policy { padding: 16px 20px; margin-bottom: 28px; }
 #plan-view .panel-policy h2 { font-size: 14px; }
 #plan-view .panel-policy p { font-size: 12px; max-width: 65ch; }
@@ -2090,18 +2112,19 @@ body.plan-mode #add-server, body.plan-mode #check-all { display: none; }
 #plan-view .plan-rule { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 20px; padding: 16px 20px; align-items: center; border-bottom: 1px solid var(--line); }
 #plan-view .plan-rule:last-child { border: 0; }
 #plan-view .plan-rule p { margin: 4px 0 0; }
-@media(max-width:1000px) {
-  #plan-view .plan-builder { grid-template-columns: 1fr; }
-  #plan-view .plan-picker { border-right: 0; border-bottom: 1px solid var(--line); }
-  #plan-view .plan-servers { max-height: 260px; }
-}
 @media(max-width:620px) {
-  #plan-view .plan-picker, #plan-view .plan-settings { padding: 18px; }
-  #plan-view .plan-selection-tools { gap: 8px; }
-  #plan-view .plan-server-state { max-width: 85px; }
-  #plan-view .plan-time-options, #plan-view .plan-task, #plan-view .plan-rule { grid-template-columns: minmax(0,1fr); }
+  #plan-view .plan-builder { padding: 18px; }
+  #plan-view .plan-schedule-fields, #plan-view .plan-task, #plan-view .plan-rule { grid-template-columns: minmax(0,1fr); }
+  #plan-view .plan-server-table, #plan-view .plan-server-table tbody { display: block; }
+  #plan-view .plan-server-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  #plan-view .plan-server-choice { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); padding: 16px 0; border-bottom: 1px solid var(--line); gap: 12px; }
+  #plan-view .plan-server-table td { display: block; border: 0; padding: 0 6px; }
+  #plan-view .plan-server-identity { grid-column: 1 / -1; }
+  #plan-view .plan-server-table td[data-label]::before { content: attr(data-label); display: block; font-size: 12px; color: var(--secondary); margin-bottom: 5px; }
   #plan-view .plan-rule { gap: 12px; }
   #plan-view .plan-group-actions { align-items: stretch; flex-direction: column; }
+  #plan-view .plan-group-actions > div { flex: 0 1 auto; }
+  #plan-view .plan-group-actions select { font-size: 16px; width: 100%; }
+  #plan-view .plan-settings-actions .button { width: 100%; }
   #plan-view .plan-task-more summary { min-height: 44px; padding: 12px 0; }
-  #plan-view .plan-selection-tools .button { padding: 8px; }
 }

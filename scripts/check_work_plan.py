@@ -18,7 +18,7 @@ def screenshot(page,path):
 def main():
     root=Path(tempfile.mkdtemp(prefix='work-plan-',dir='.test-tmp')).absolute()
     source=root/'synthetic.json'
-    source.write_text(json.dumps([{'id':str(i),'name':f'Сервер {i:02}','login':f'demo-{i:02}',
+    source.write_text(json.dumps([{'id':str(i),'name':f'Сервер {i:02}'+(' — клиентский портал с длинным названием' if i==2 else ''),'login':f'demo-{i:02}',
         'password':'synthetic' if i!=6 else '','ftp_host':'ftp.example.test','ftp_login':f'demo-{i:02}',
         'ftp_password':'synthetic'} for i in range(1,7)]),encoding='utf-8')
     mapping={key:key for key in ('id','name','login','password','ftp_host','ftp_login','ftp_password')}
@@ -42,6 +42,11 @@ def main():
         with sync_playwright() as pw:
             browser=pw.chromium.launch(channel='chrome',headless=True)
             for width in (1440,1000,800,390):
+                # Each viewport starts with the same synthetic work history.
+                # STOPPED tasks from a previous viewport are legitimate history,
+                # not duplicate submissions made by the next viewport.
+                with management.catalog.connection() as db:
+                    db.execute('DELETE FROM tasks WHERE row_id IN (2,3)')
                 page=browser.new_page(viewport={'width':width,'height':1100})
                 page.on('pageerror',lambda e:errors.append(str(e)))
                 def guard(route):
@@ -55,9 +60,21 @@ def main():
                     route.continue_()
                 page.route('**/*',guard)
                 page.goto(f'http://127.0.0.1:{server.server_port}/#plan',wait_until='networkidle')
+                expect(page.locator('#plan-server-table')).to_be_visible()
+                expect(page.locator('#plan-repeat')).to_be_visible()
+                expect(page.locator('#plan-start-at')).to_be_visible()
+                expect(page.locator('#plan-submit')).to_be_disabled()
+                assert page.locator('#plan-repeat').evaluate('(el)=>getComputedStyle(el).fontSize')==page.locator('#db-schedule-preset').evaluate('(el)=>getComputedStyle(el).fontSize')
+                assert page.locator('#plan-repeat').bounding_box()['height']>=44
+                assert page.locator('#plan-server-table').get_attribute('aria-label')=='Серверы для планирования выгрузок'
                 expect(page.locator('.plan-server-choice')).to_have_count(6)
                 page.locator('[data-plan-row="2"]').check()
                 page.locator('[data-plan-row="3"]').check()
+                page.locator('[data-plan-row="2"]').press('Space')
+                expect(page.locator('[data-plan-row="2"]')).not_to_be_checked()
+                page.locator('[data-plan-row="2"]').press('Space')
+                expect(page.locator('[data-plan-row="2"]')).to_be_checked()
+                assert page.locator('[data-plan-row="2"]').evaluate('(el)=>getComputedStyle(el.closest("tr")).outlineStyle')=='solid'
                 page.locator('[data-plan-row="6"]').check()
                 page.locator('#plan-databases').check()
                 expect(page.locator('[data-plan-row="6"]')).to_be_enabled()
@@ -65,10 +82,13 @@ def main():
                 page.locator('#plan-repeat').select_option('72')
                 page.locator('#plan-start-at').fill('2030-01-01T12:00')
                 expect(page.locator('#plan-selected-count')).to_have_text('Выбрано 2')
+                page.evaluate('document.dispatchEvent(new Event("backup:state"))')
+                expect(page.locator('#plan-start-at')).to_have_value('2030-01-01T12:00')
                 page.locator('#plan-search').fill('Сервер 02')
                 expect(page.locator('.plan-server-choice')).to_have_count(1)
                 expect(page.locator('#plan-selected-count')).to_have_text('Выбрано 2')
                 page.locator('#plan-search').fill('')
+                expect(page.locator('#plan-servers [data-plan-row="3"]')).to_be_checked()
                 assert page.locator('#plan-repeat option').count()==14
                 assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
                 if width==1440:
@@ -93,11 +113,13 @@ def main():
                 if width==1440:
                     page.locator('#plan-submit').click()
                     expect(page.locator('#plan-message')).to_contain_text('Расписание сохранено')
+                    expect(page.locator('#plan-submit')).to_be_enabled()
                     assert all(r['enabled'] for r in management.work_plans.list() if r['row'] in {2,3})
                 page.locator('#plan-repeat').select_option('')
                 page.locator('#plan-start-at').fill('')
                 page.locator('#plan-submit').click()
                 expect(page.locator('#plan-message')).to_contain_text('В очереди 4 заданий')
+                expect(page.locator('#plan-submit')).to_be_enabled()
                 assert len([t for t in management.tasks() if t['row'] in {2,3}])==4
                 expect(page.locator('[data-plan-row="2"]')).to_be_checked()
                 for action,expected_state in [('pause','PAUSED'),('resume','QUEUED'),('stop','STOPPED')]:
