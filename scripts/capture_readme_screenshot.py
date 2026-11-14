@@ -1,5 +1,9 @@
 """Render the real local UI with synthetic accounts only; never contact Jino."""
+import argparse
+import hashlib
 import json
+import shutil
+import struct
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -124,16 +128,55 @@ def main():
                 page.locator("#auto-refresh").blur()
                 page.evaluate("window.scrollTo(0, 0)")
                 page.screenshot(path=str(destination), full_page=False)
+                page.locator('[data-view="plan"]').click()
+                expect(page.locator('#plan-view')).to_be_visible()
+                expect(page.locator('#plan-pending .plan-task').first).to_be_visible()
+                assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+                page.evaluate("window.scrollTo(0, 0)")
+                page.screenshot(path=str(destination.with_name('work-plan.png')), full_page=True)
+                assert not errors, errors
             finally:
                 browser.close()
     finally:
         server.shutdown()
         server.server_close()
         serving.join(timeout=5)
-    print(json.dumps({"screenshot": "docs/images/dashboard.png", "synthetic_accounts": 6,
+        management.close()
+    print(json.dumps({"screenshots": ["docs/images/dashboard.png", "docs/images/work-plan.png"], "synthetic_accounts": 6,
                       "customer_data_read": False, "external_requests_sent": 0,
                       "blocked_requests": len(blocked), "page_errors": 0}))
 
 
-if __name__ == "__main__":
+def capture_all():
+    workspace = Path(__file__).resolve().parents[1]
+    destination = workspace / 'docs/images'
+    previous = {path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in destination.glob('*.png')}
     main()
+    from check_database_card import main as capture_databases
+    capture_databases()
+    for source, target in (('database-card-1440.png','database-catalog.png'),
+                           ('database-schedule-1440.png','database-schedule.png'),
+                           ('database-card-390.png','database-mobile.png')):
+        shutil.copyfile(workspace / '.impeccable/review' / source, destination / target)
+    entries = []
+    for name in ('dashboard.png','work-plan.png','database-catalog.png','database-schedule.png','database-mobile.png'):
+        data = (destination / name).read_bytes()
+        assert data[:8] == b'\x89PNG\r\n\x1a\n'
+        width,height = struct.unpack('>II',data[16:24])
+        digest = hashlib.sha256(data).hexdigest()
+        entries.append({'file':name,'width':width,'height':height,'sha256':digest,
+                        'changed':previous.get(name) != digest})
+    manifest = {'captured_at':datetime.now(timezone.utc).isoformat(),'synthetic_only':True,
+                'command':'.venv/Scripts/python.exe scripts/capture_readme_screenshot.py --all',
+                'customer_data_read':False,'screenshots':entries}
+    (destination / 'screenshots.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    print(json.dumps(manifest,ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--all',action='store_true',help='Пересоздать всю галерею и манифест синтетических снимков')
+    if parser.parse_args().all:
+        capture_all()
+    else:
+        main()
