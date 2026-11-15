@@ -215,6 +215,35 @@ function current(server) {
 function saved(server) {
   return server.progress.received_bytes + server.databases.received_bytes;
 }
+function fileCopyHistory(server) {
+  const latest = server.latest_tasks?.files;
+  const numeric = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const metrics = (task, fallback = {}) => {
+    const p = task?.progress || fallback;
+    const result = task?.result || {};
+    const successful = task?.state === 'FINISHED' && ['FILES_ONLY','COMPLETE'].includes(result.status);
+    const amount = successful && numeric(result.files_bytes) !== null ? result.files_bytes : numeric(p.received_bytes) ?? numeric(result.files_bytes);
+    const files = successful && numeric(result.files_count) !== null ? result.files_count : numeric(p.verified_files) ?? numeric(result.files_count);
+    return {bytes:amount ?? 0,bytesKnown:amount !== null,files,successful};
+  };
+  const current = metrics(latest, server.progress || {});
+  const prior = (server.tasks || []).find(task => task.kind === 'files' && task.id !== latest?.id &&
+    (latest?.revision === undefined || task.revision === undefined || latest.revision === task.revision) &&
+    (()=>{const m=metrics(task);return m.bytes>0 || m.files>0;})());
+  const previous = prior ? metrics(prior) : null;
+  const fromPrevious = !!previous && !(current.bytes>0 || current.files>0);
+  return {current,previous,display:fromPrevious?previous:current,fromPrevious};
+}
+function renderFileCopyHistory(target,server) {
+  const history=fileCopyHistory(server);
+  target.replaceChildren();target.hidden=!history.previous;
+  if (!history.previous) return;
+  const previous=history.previous;
+  target.append(element('p','progress-caption',previous.successful?'Предыдущая копия':'Сохранено в предыдущем запуске'),
+    element('p','helper',(previous.bytesKnown?bytes(previous.bytes):'Объём неизвестен')+
+      (previous.files===null?'':' · Файлов: '+count(previous.files))),
+    element('p','helper','Текущий запуск и его проверка показаны отдельно.'));
+}
 function fileVerificationProgress(task) {
   const p = task?.progress || {};
   const numeric = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -813,8 +842,9 @@ function renderTable() {
       );
     tr.append(stageCell);
     const sizeCell = element("td", "bytes-column");
+    const fileHistory = fileCopyHistory(server);
     sizeCell.append(
-      element("span", "availability-sub row-progress-label", "Прогресс сервера")
+      element("span", "availability-sub row-progress-label", fileHistory.previous?'Текущий запуск':"Прогресс сервера")
     );
     sizeCell.append(
       element(
@@ -823,6 +853,9 @@ function renderTable() {
         saved(server) > 0 ? bytes(saved(server)) : "—"
       )
     );
+    if (fileHistory.previous) sizeCell.append(element('span','availability-sub file-copy-history',
+      'Ранее сохранено: '+(fileHistory.previous.bytesKnown?bytes(fileHistory.previous.bytes):'объём неизвестен')+
+      (fileHistory.previous.files===null?'':' · Файлов: '+count(fileHistory.previous.files))));
     const work = serverWorkProgress(server);
     if (work.parts.length) {
       const p = element("progress", "row-progress");
@@ -923,6 +956,7 @@ function renderDetail() {
     ? "Проверка выполняется…"
     : "Проверить доступ";
   renderFileVerification($('detail-file-verification'), server.latest_tasks?.files);
+  renderFileCopyHistory($('detail-file-copy-history'),server);
   const file = current(server);
   text(
     "current-title",

@@ -298,14 +298,14 @@
     $("card-check-panel").disabled =
       server.blocked || server.busy || !server.can_check || pending;
     text("card-folder", server.folder_path);
-    const fileVerification = server.latest_tasks?.files ? fileVerificationProgress(server.latest_tasks.files) : null;
+    const fileCopies = fileCopyHistory(server);
     renderFileVerification($('card-file-verification'), server.latest_tasks?.files);
+    renderFileCopyHistory($('card-file-copy-history'),server);
     const facts = document.createDocumentFragment();
     for (const [label, value] of [
-      ["Файлов проверено", fileVerification ?
-        fileVerification.checked === null ? 'Уточняется' : count(fileVerification.checked) +
-        (fileVerification.total === null ? '' : ' из ' + count(fileVerification.total)) : count(server.progress.verified_files)],
-      ["Файлы сохранены", bytes(server.progress.received_bytes)],
+      [fileCopies.fromPrevious?'Ранее сохранено файлов':'Файлов сохранено',fileCopies.display.files===null?'Нет данных':count(fileCopies.display.files)],
+      [fileCopies.fromPrevious?'Объём предыдущей копии':'Сохранено в текущем запуске',
+        fileCopies.display.bytesKnown?bytes(fileCopies.display.bytes):'Объём неизвестен'],
       ["Дампов проверено", count(server.databases.verified_count)],
       ["Исходный снимок", dateLabel(server.databases.snapshot_date)],
     ]) {
@@ -579,6 +579,8 @@
           const verification = node('div','file-verification-summary');
           renderFileVerification(verification,task);
           fragment.append(verification);
+          const history = node('div','file-copy-history');
+          renderFileCopyHistory(history,server);fragment.append(history);
           if (task.transport === "ftps")
             fragment.append(
               node(

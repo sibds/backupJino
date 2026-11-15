@@ -489,6 +489,8 @@
 }
 .file-verification-summary .progress-caption { font-weight: 600; }
 #card-file-verification { margin: 0 0 24px; }
+#card-file-copy-history { margin-bottom: 24px; }
+.file-copy-history .progress-caption { font-weight: 600; }
 .job-area .progress-caption {
   max-width: 780px;
   margin-bottom: 8px;

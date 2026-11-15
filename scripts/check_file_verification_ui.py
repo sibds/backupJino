@@ -11,8 +11,8 @@ from jino_backup.state import Settings
 def main():
     root=Path(tempfile.mkdtemp(prefix='file-verification-',dir='.test-tmp')).absolute()
     source=root/'synthetic.json'
-    source.write_text(json.dumps([{'id':'synthetic','name':'Демонстрационный сервер','login':'demo',
-        'password':'synthetic','ftp_host':'ftp.example.test','ftp_login':'demo','ftp_password':'synthetic'}]),encoding='utf-8')
+    source.write_text(json.dumps([{'id':str(i),'name':'Демонстрационный сервер' if i==1 else 'Сервер с новым заданием','login':f'demo-{i}',
+        'password':'synthetic','ftp_host':'ftp.example.test','ftp_login':f'demo-{i}','ftp_password':'synthetic'} for i in (1,2)]),encoding='utf-8')
     mapping={k:k for k in ('id','name','login','password','ftp_host','ftp_login','ftp_password')}
     mapping.update(ftp_protocol='ftps',ftp_port=21)
     Settings.initialize(root/'state',root/'archives',root/'state/master.key')
@@ -24,6 +24,10 @@ def main():
         'processed_files':1261,'verified_files':7902,'pending_verifications':6412,
         'received_bytes':714229120,'planned_bytes':714229120,'active_transfers':0}
     management._update(task['id'],state='RUNNING',stage='FILE_VERIFY',progress=progress)
+    old=management.start(2,'files',{'transport':'ftps'})
+    management._update(old['id'],state='FAILED',stage='FILES_DOWNLOAD',error_code='TRANSFER_TIMEOUT',
+        progress={'received_bytes':33772692669,'verified_files':14992})
+    management.start(2,'files',{'transport':'ftps','fresh_run':True})
     server=make_server(data,port=0);threading.Thread(target=server.serve_forever,daemon=True).start()
     captures=Path('.impeccable/review');captures.mkdir(parents=True,exist_ok=True)
     errors=[];blocked=[]
@@ -32,6 +36,7 @@ def main():
             browser=pw.chromium.launch(channel='chrome',headless=True)
             for width in (1440,1000,800,390):
                 page=browser.new_page(viewport={'width':width,'height':1100})
+                page.emulate_media(reduced_motion='reduce')
                 page.on('pageerror',lambda error:errors.append(str(error)))
                 def guard(route):
                     url=urlsplit(route.request.url)
@@ -45,7 +50,8 @@ def main():
                 expect(target).to_contain_text('Передача файлов завершена')
                 expect(target).to_contain_text(re.compile(r'Проверено 1\s261 из 7\s673'))
                 expect(target).to_contain_text(re.compile(r'6\s412 ожидают проверки'))
-                assert '7902' not in re.sub(r'\s','',page.locator('#card-backup-facts').inner_text())
+                expect(page.locator('#card-backup-facts')).to_contain_text('Файлов сохранено')
+                assert '7902' in re.sub(r'\s','',page.locator('#card-backup-facts').inner_text())
                 page.evaluate('document.activeElement?.blur();scrollTo(0,0)')
                 page.screenshot(path=str(captures/f'file-verification-overview-{width}.png'),full_page=True)
                 page.locator('[data-card-tab="files"]').click()
@@ -58,6 +64,23 @@ def main():
                 page.screenshot(path=str(captures/f'file-verification-files-{width}.png'),full_page=True)
                 page.locator('[data-view="servers"]').click()
                 expect(page.locator('#detail-file-verification')).to_contain_text(re.compile(r'Проверено 1\s261 из 7\s673'))
+                expect(page.locator('tr[data-server-row="2"] .file-copy-history')).to_contain_text(re.compile(r'14\s992'))
+                page.locator('tr[data-server-row="2"] td').nth(1).click()
+                expect(page.locator('#detail-file-copy-history')).to_contain_text(re.compile(r'33,77\sГБ'))
+                page.locator('tr[data-server-row="2"] .file-copy-history').scroll_into_view_if_needed()
+                expect(page.locator('tr[data-server-row="2"] .bytes-column')).to_have_css('display','block' if width==390 else 'table-cell')
+                assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+                page.evaluate('document.activeElement?.blur();scrollTo(0,0)')
+                page.screenshot(path=str(captures/f'file-copy-history-table-{width}.png'),full_page=True)
+                page.goto(f'http://127.0.0.1:{server.server_port}/#server/2',wait_until='networkidle')
+                page.locator('[data-card-tab="overview"]').click()
+                expect(page.locator('#card-backup-facts')).to_contain_text('Ранее сохранено файлов')
+                expect(page.locator('#card-backup-facts')).to_contain_text(re.compile(r'14\s992'))
+                expect(page.locator('#card-file-copy-history')).to_be_visible()
+                expect(page.locator('#card-file-copy-history')).to_contain_text(re.compile(r'33,77\sГБ'))
+                assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+                page.evaluate('document.activeElement?.blur();scrollTo(0,0)')
+                page.screenshot(path=str(captures/f'file-copy-history-{width}.png'),full_page=True)
                 page.close()
             browser.close()
         assert not errors,errors
