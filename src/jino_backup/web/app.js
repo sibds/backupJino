@@ -215,6 +215,54 @@ function current(server) {
 function saved(server) {
   return server.progress.received_bytes + server.databases.received_bytes;
 }
+function fileVerificationProgress(task) {
+  const p = task?.progress || {};
+  const numeric = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const successful = task?.state === 'FINISHED' && ['FILES_ONLY','COMPLETE'].includes(task.result?.status);
+  let total = p.inventory_complete ? numeric(p.planned_files) : null;
+  if (total === null && successful) total = numeric(task.result?.files_count);
+  let checked = numeric(p.processed_files);
+  if (successful && numeric(task.result?.files_count) !== null) total = checked = task.result.files_count;
+  if (checked === null && successful) checked = total;
+  if (total !== null && checked !== null && checked > total) total = null;
+  const pending = successful ? 0 : numeric(p.pending_verifications);
+  const transferComplete = p.download_phase_complete === true || successful;
+  let title = successful ? 'Файлы скачаны и проверены' : transferComplete ? 'Передача файлов завершена' : 'Копирование файлов';
+  if (task?.result?.status === 'PARTIAL') title = 'Частичный результат копирования';
+  else if (task?.state === 'FAILED') title = 'Файловое задание завершилось ошибкой';
+  else if (task?.state === 'STOPPED') title = 'Файловое задание остановлено';
+  let caption = checked === null ? 'Число проверенных файлов уточняется' :
+    'Проверено ' + count(checked) + (total === null ? ' файлов' : ' из ' + count(total));
+  if (pending !== null) caption += ' · ' + count(pending) + ' ожидают проверки';
+  const note = task?.state === 'PAUSED' ? 'Задание на паузе' :
+    task?.stage === 'VERIFICATION_WAIT' ? 'Ожидает очереди проверки' :
+    transferComplete && task?.state === 'RUNNING' && pending > 0 ? 'Идёт проверка сохранённых файлов' : '';
+  return {total,checked,pending,successful,transferComplete,title,caption,note};
+}
+function renderFileVerification(target, task) {
+  target.hidden = !task;
+  if (!task) {
+    target.replaceChildren();
+    delete target.dataset.verification;
+    return;
+  }
+  const verification = fileVerificationProgress(task);
+  const signature = JSON.stringify(verification);
+  if (target.dataset.verification === signature) return;
+  target.dataset.verification = signature;
+  target.replaceChildren();
+  target.append(element('p','helper',verification.title),element('p','progress-caption','Проверка файлов'));
+  if (verification.total > 0 && verification.checked !== null) {
+    const bar = element('progress','job-progress');
+    bar.max = verification.total;
+    bar.value = verification.checked;
+    bar.setAttribute('aria-label','Проверка файлов сервера');
+    bar.setAttribute('aria-valuetext',verification.caption);
+    target.append(bar);
+  }
+  target.append(element('p','helper',verification.caption));
+  if (verification.note) target.append(element('p','helper',verification.note));
+}
 function serverWorkProgress(server) {
   const tasks = { ...(server.latest_tasks || {}) };
   if (!tasks.files && !tasks.databases) {
@@ -874,6 +922,7 @@ function renderDetail() {
     : checking
     ? "Проверка выполняется…"
     : "Проверить доступ";
+  renderFileVerification($('detail-file-verification'), server.latest_tasks?.files);
   const file = current(server);
   text(
     "current-title",
@@ -881,7 +930,7 @@ function renderDetail() {
   );
   text(
     "current-name",
-    file?.name || "Подробности появятся после начала передачи"
+    file?.name || (server.latest_tasks?.files?.progress?.download_phase_complete ? 'Нет активных передач' : "Подробности появятся после начала передачи")
   );
   text(
     "current-percent",
@@ -911,6 +960,8 @@ function renderDetail() {
       ? "Последняя запись " +
           (stamp ? age(stamp) : "время неизвестно") +
           ". Проверка целого файла — после скачивания."
+      : server.latest_tasks?.files?.progress?.download_phase_complete
+      ? 'Передача завершена. Ход проверки файлов показан выше.'
       : "Общий объём дерева заранее неизвестен. Ожидание в очереди не означает недоступность сервера."
   );
   text(

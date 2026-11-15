@@ -487,6 +487,8 @@
   max-width: 780px;
   height: 9px;
 }
+.file-verification-summary .progress-caption { font-weight: 600; }
+#card-file-verification { margin: 0 0 24px; }
 .job-area .progress-caption {
   max-width: 780px;
   margin-bottom: 8px;

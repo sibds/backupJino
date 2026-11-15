@@ -298,9 +298,13 @@
     $("card-check-panel").disabled =
       server.blocked || server.busy || !server.can_check || pending;
     text("card-folder", server.folder_path);
+    const fileVerification = server.latest_tasks?.files ? fileVerificationProgress(server.latest_tasks.files) : null;
+    renderFileVerification($('card-file-verification'), server.latest_tasks?.files);
     const facts = document.createDocumentFragment();
     for (const [label, value] of [
-      ["Файлов проверено", count(server.progress.verified_files)],
+      ["Файлов проверено", fileVerification ?
+        fileVerification.checked === null ? 'Уточняется' : count(fileVerification.checked) +
+        (fileVerification.total === null ? '' : ' из ' + count(fileVerification.total)) : count(server.progress.verified_files)],
       ["Файлы сохранены", bytes(server.progress.received_bytes)],
       ["Дампов проверено", count(server.databases.verified_count)],
       ["Исходный снимок", dateLabel(server.databases.snapshot_date)],
@@ -557,13 +561,13 @@
           const bar = node("progress", "job-progress");
           bar.max = 100;
           if (ratio !== null) bar.value = ratio;
-          bar.setAttribute("aria-label", "Общий прогресс файлов сервера");
+          bar.setAttribute("aria-label", "Передача файлов сервера");
           fragment.append(
             bar,
             node(
               "p",
               "progress-caption",
-              bytes(progress.received_bytes || 0) +
+              'Передача: ' + bytes(progress.received_bytes || 0) +
                 (known
                   ? " из " +
                     bytes(progress.planned_bytes) +
@@ -572,16 +576,9 @@
                   : " · Объём подсчитывается")
             )
           );
-          fragment.append(
-            node(
-              "p",
-              "helper",
-              "Найдено файлов " +
-                count(progress.planned_files) +
-                ", проверено " +
-                count(progress.verified_files)
-            )
-          );
+          const verification = node('div','file-verification-summary');
+          renderFileVerification(verification,task);
+          fragment.append(verification);
           if (task.transport === "ftps")
             fragment.append(
               node(
