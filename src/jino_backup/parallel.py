@@ -179,7 +179,8 @@ class ParallelCollector:
         self.snapshot, self.checkpoint = snapshot, checkpoint
         private_dir(local_path(snapshot, "files"))
         self.abort, self.ready, self.scanned = threading.Event(), threading.Event(), threading.Event()
-        self.control = RunControl(self.base_control, self.abort, time.monotonic() + self.timeout, self.wait)
+        deadline = float('inf') if self.timeout is None else time.monotonic() + self.timeout
+        self.control = RunControl(self.base_control, self.abort, deadline, self.wait)
         self.files_queue = queue.Queue(maxsize=32)
         # Completed files must never fill the download queue or block inventory.
         self.verify_queue = queue.PriorityQueue(maxsize=self.max_files)

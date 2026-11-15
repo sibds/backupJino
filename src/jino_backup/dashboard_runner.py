@@ -64,7 +64,6 @@ class ControlledSource:
                 finally:
                     db.close()
             queue = [("", 0)]
-            deadline = time.monotonic() + 86400
             planned_bytes = planned_files = 0
             last_scan_notice = 0
             self.progress(
@@ -77,8 +76,6 @@ class ControlledSource:
                 parent, depth = queue.pop()
                 if depth > 64 or planned_files + len(self.inventory) + len(queue) > 1000000:
                     raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-                if time.monotonic() > deadline:
-                    raise BackupError("TRANSFER_TIMEOUT")
                 self.progress(stage="SCANNING", log=True, directory=parent or "/")
                 try:
                     entries = list(self.source.listdir(parent))
@@ -200,8 +197,8 @@ class OperatorRunner:
             control.checkpoint()
             progress(stage="AUTHENTICATE", retry_attempt=0, retry_limit=5, retry_at=None, retry_delay_seconds=0)
             if task["kind"] == "files" and task["transport"] in {"ftps", "sftp"}:
-                first = task.get('first_started_at') or task.get('started_at')
-                remaining = max(1, int(86400-(datetime.now(timezone.utc)-datetime.fromisoformat(first)).total_seconds())) if first else 86400
+                # Managed copies finish their inventory; only individual I/O operations time out.
+                remaining = None
                 ftp = dict(credentials["ftp"], protocol=task["transport"])
                 plan = ServerPlan(
                     {"rows_total": 1, "servers_ready": 1, "needs_review": 0},
@@ -278,8 +275,7 @@ class OperatorRunner:
                         skip_unsupported_names=skip_names, continue_on_error=True,
                     )
 
-                first = task.get('first_started_at') or task.get('started_at')
-                remaining = max(1, int(86400-(datetime.now(timezone.utc)-datetime.fromisoformat(first)).total_seconds())) if first else 86400
+                remaining = None
                 result = PanelFileJob(
                     self.data.destination,
                     server["server_id"],

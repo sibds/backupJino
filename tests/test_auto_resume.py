@@ -45,18 +45,28 @@ def test_stop_cancels_a_pending_automatic_resume(management):
     assert not management.task(task['id']).get('auto_resume_at')
 
 
-def test_auto_resume_backoff_is_bounded_and_deadline_is_not_reset(management):
+def test_auto_resume_after_24_hours_keeps_key_start_and_backoff(management):
     from datetime import datetime, timezone, timedelta
     future='2099-01-01T00:00:00Z'
     task=management.start(1,'files',{'scheduled_at':future})
     started=(datetime.now(timezone.utc)-timedelta(hours=25)).isoformat()
     management._update(task['id'],state='FAILED',error_code='TRANSFER_INTERRUPTED',first_started_at=started,started_at=started)
-    assert not management._queue_file_resume(task['id'])
-    management._update(task['id'],first_started_at=datetime.now(timezone.utc).isoformat(),auto_resume_count=99)
+    assert management._queue_file_resume(task['id'])
+    assert management.task(task['id'])['first_started_at']==started
+    management._update(task['id'],state='FAILED',error_code='TRANSFER_INTERRUPTED',auto_resume_count=99)
     assert management._queue_file_resume(task['id'])
     queued=management.task(task['id'])
     remaining=management._scheduled_timestamp(queued['scheduled_at'])-time.time()
     assert 3500<remaining<=3600
+
+
+def test_queued_download_older_than_a_day_still_runs(management):
+    task=management.start(1,'files',{'scheduled_at':'2099-01-01T00:00:00Z'})
+    management.runner=lambda *args:{'status':'FILES_ONLY'}
+    management._update(task['id'],first_started_at='2020-01-01T00:00:00+00:00',scheduled_at=None)
+    management._wake()
+    wait_status(management,task['id'],'FINISHED')
+    assert management.task(task['id'])['first_started_at']=='2020-01-01T00:00:00+00:00'
 
 
 def test_file_restart_queues_resume_and_keeps_its_due_time_on_second_restart(management):

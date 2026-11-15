@@ -43,7 +43,7 @@ def test_recurring_manual_stop_does_not_create_another_version(management):
     assert management.task(task['id'])['state']=='STOPPED'
 
 
-def test_first_file_copy_renews_deadline_without_changing_key(management):
+def test_first_file_copy_has_no_total_deadline_and_keeps_original_start(management):
     recurring(management)
     task=management.start(1,'files',{})
     management._update(task['id'],state='FAILED',error_code='TRANSFER_TIMEOUT',
@@ -51,8 +51,7 @@ def test_first_file_copy_renews_deadline_without_changing_key(management):
     assert management._queue_file_resume(task['id'])
     current=management.task(task['id'])
     assert current['state']=='SCHEDULED'
-    assert current['first_copy_started_at']=='2020-01-01T00:00:00+00:00'
-    assert current['first_started_at']!='2020-01-01T00:00:00+00:00'
+    assert current['first_started_at']=='2020-01-01T00:00:00+00:00'
     assert current['progress']['received_bytes']==12345
     assert current['auto_resume_count']==1
 

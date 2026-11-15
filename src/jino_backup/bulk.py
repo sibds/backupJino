@@ -90,7 +90,8 @@ class DownloadBatch:
         self.batch_id, self.run_id = batch_id, identity('download', batch_id)
         self.remote_root, self.source_factory = safe_root(remote_root), source_factory
         self.max_bytes, self.max_files, self.timeout_seconds = max_bytes, max_files, timeout_seconds
-        if not (1 <= max_bytes <= 1024**5 and 1 <= max_files <= 1000000 and 1 <= timeout_seconds <= 86400):
+        if not (1 <= max_bytes <= 1024**5 and 1 <= max_files <= 1000000
+                and (timeout_seconds is None or 1 <= timeout_seconds <= 86400)):
             raise BackupError('LIMIT_INVALID')
         self.known_hosts = known_hosts
         self.continue_on_error = continue_on_error

@@ -387,7 +387,7 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                   skip_unsupported_names=False, skip_unsupported_types=False):
     destination = Path(destination)
     private_dir(destination)
-    deadline = time.monotonic() + timeout_seconds
+    deadline = float('inf') if timeout_seconds is None else time.monotonic() + timeout_seconds
     queue, seen, files, directories = [("", 0)], {}, [], []
     duplicates=[]
     total = planned = 0

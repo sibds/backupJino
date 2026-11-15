@@ -475,9 +475,6 @@ class DashboardManagement:
                     return task
                 if task.get('auto_resume_at'):
                     self._update(task_id, scheduled_at=None, auto_resume_at=None)
-                first = task.get('first_started_at')
-                if first and time.time() - self._scheduled_timestamp(first) >= 86400:
-                    self._update(task_id, first_started_at=timestamp())
                 if not active:
                     control = TaskControl(lambda state: self._control_state(task_id, state))
                     self.controls[task_id] = control
@@ -570,9 +567,6 @@ class DashboardManagement:
             if due > time.time():
                 self._update(task["id"], state="SCHEDULED", next_at=iso_time(due))
                 next_wake.append(due)
-                continue
-            if task['kind'] == 'files' and task.get('first_started_at') and time.time() - self._scheduled_timestamp(task['first_started_at']) >= 86400:
-                self._update(task['id'], state='FAILED', error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
                 continue
             if self._uses_panel(task):
                 try:
@@ -897,18 +891,12 @@ class DashboardManagement:
                 return False
         first = task.get('first_started_at') or task.get('started_at')
         if not first: return False
-        if time.time() - self._scheduled_timestamp(first) >= 86400:
-            if not first_copy:
-                self._update(task_id, error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
-                return False
-            self._update(task_id,first_copy_started_at=task.get('first_copy_started_at') or first)
-            first=timestamp()
         progress = dict(task.get('progress', {}))
         saved = progress.get('received_bytes', 0)
         previous_attempt = task.get('auto_resume_count', 0)
         if saved > task.get('auto_resume_bytes', 0): previous_attempt = 0
         attempt = previous_attempt + 1
-        due = min(time.time()+AUTO_FILE_DELAYS[min(attempt-1,len(AUTO_FILE_DELAYS)-1)], self._scheduled_timestamp(first)+86400)
+        due = time.time()+AUTO_FILE_DELAYS[min(attempt-1,len(AUTO_FILE_DELAYS)-1)]
         scheduled = iso_time(due)
         progress.update(active_files=[],active_transfers=0,current_file='',retry_at=None,retry_delay_seconds=0)
         self._update(task_id, state='SCHEDULED', stage='AUTO_RESUME_WAIT', scheduled_at=scheduled,
