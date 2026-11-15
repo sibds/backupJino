@@ -182,10 +182,11 @@ class DashboardManagement:
             if row is not None:
                 query += " WHERE row_id=?"
                 values = (row,)
-            return [
+            tasks = [
                 json.loads(record[0])
                 for record in db.execute(query + " ORDER BY rowid DESC", values)
             ]
+            return sorted(tasks,key=lambda task:bool(task.get('first_copy_wait_for')))
 
     def _update(self, task_id, **changes):
         with self.lock, self.catalog.connection() as db:
@@ -513,6 +514,7 @@ class DashboardManagement:
         if self.timer:
             self.timer.cancel()
             self.timer = None
+        self.work_plans.reconcile_first_copies()
         self._schedule_databases()
         self.work_plans.tick()
         all_tasks = self.tasks()
@@ -524,6 +526,23 @@ class DashboardManagement:
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
                 continue
+            if task['kind']=='databases' and task.get('schedule_occurrence'):
+                from .work_plans import full_copy
+                has_copy=any(t['kind']=='databases' and t['revision']==task['revision'] and full_copy(t)
+                             for t in self.tasks(task['row']))
+                if has_copy and self.work_plans.first_copy_pending(task['row'],task['revision']):
+                    if task['stage']!='FIRST_COPY_WAIT':self._update(task['id'],stage='FIRST_COPY_WAIT')
+                    continue
+            if task.get('first_copy_wait_for'):
+                from .work_plans import full_copy
+                baseline=self.task(task['first_copy_wait_for'])
+                if not full_copy(baseline) or self.work_plans.first_copy_pending(task['row'],task['revision']):
+                    continue
+                # A retained surplus version starts at the next interval, never in a burst.
+                rule=next((r for r in self.work_plans.list() if r['row']==task['row']
+                    and r['revision']==task['revision'] and r['kind']==task['kind']),None)
+                task=self._update(task['id'],first_copy_wait_for=None,stage='WAITING',
+                    scheduled_at=iso_time(time.time()+(rule['every_hours']*3600 if rule else 10800)))
             if task.get('auto_resume_at') or task['kind']=='databases' and task.get('db_redownload_count',0)>0:
                 server = self.catalog.get(task['row'], include_deleted=True)
                 if server['blocked'] or server['deleted']:
@@ -597,6 +616,8 @@ class DashboardManagement:
         try:
             for server in self.catalog.all():
                 if server['blocked'] or server['deleted'] or not server['can_check']:
+                    continue
+                if self.work_plans.first_copy_pending(server['row'],server['binding_revision']):
                     continue
                 if any(t['kind']=='databases' and (t['state'] in ACTIVE or t['id'] in self.running) for t in self.tasks(server['row'])):
                     continue
@@ -868,12 +889,20 @@ class DashboardManagement:
         server = self.catalog.get(task['row'], include_deleted=True)
         if server['blocked'] or server['deleted'] or server['binding_revision'] != task['revision']: return False
         latest = next(t for t in self.tasks(task['row']) if t['kind']=='files')
-        if latest['id'] != task_id: return False
+        first_copy=self.work_plans.first_file_copy(task)
+        if latest['id'] != task_id:
+            if not first_copy or any(t['kind']=='files' and t['id']!=task_id
+                    and not t.get('first_copy_wait_for')
+                    and (t['state'] in ACTIVE or t['id'] in self.running) for t in self.tasks(task['row'])):
+                return False
         first = task.get('first_started_at') or task.get('started_at')
         if not first: return False
         if time.time() - self._scheduled_timestamp(first) >= 86400:
-            self._update(task_id, error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
-            return False
+            if not first_copy:
+                self._update(task_id, error_code='TRANSFER_TIMEOUT', auto_resume_at=None)
+                return False
+            self._update(task_id,first_copy_started_at=task.get('first_copy_started_at') or first)
+            first=timestamp()
         progress = dict(task.get('progress', {}))
         saved = progress.get('received_bytes', 0)
         previous_attempt = task.get('auto_resume_count', 0)

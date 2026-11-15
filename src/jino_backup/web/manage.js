@@ -15,6 +15,7 @@
   let databaseVisible = [];
   const labels = {
     AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
+    FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
     DB_REDOWNLOAD_WAIT: "Ожидает повторного скачивания дампа",
     SCHEDULED: "Запланировано",
     WAITING_RATE_LIMIT: "Ожидает часового интервала",

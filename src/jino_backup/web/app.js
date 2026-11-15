@@ -107,6 +107,7 @@ const statuses = {
 };
 const stages = {
   AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
+  FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
   FILE_VERIFY: "Проверка сохранённых файлов",
   RETRY_WAIT: "Ожидает переподключения",
   RETRY_EXHAUSTED: "Попытки восстановления исчерпаны",

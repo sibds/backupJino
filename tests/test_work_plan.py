@@ -4,6 +4,110 @@ from test_dashboard_management import management
 from jino_backup.errors import BackupError
 
 
+def recurring(management, files=True, databases=False):
+    management._schedule=lambda:None
+    management.work_plans.submit({'rows':[1],'files':files,'databases':databases,'every_hours':3,
+        'scheduled_at':'2030-01-01T00:00:00+00:00','request_id':'first-copy-request-123'})
+
+
+def test_recurring_partial_copy_keeps_original_key(management):
+    recurring(management)
+    management.work_plans.tick(now=1893456001)
+    task=management.tasks()[0]
+    management._update(task['id'],state='FINISHED',result={'status':'PARTIAL'})
+    management.work_plans.tick(now=1893466801)
+    assert len(management.tasks())==1
+    assert management.task(task['id'])['state']=='QUEUED'
+
+
+def test_first_complete_database_copy_waits_for_first_files(management):
+    recurring(management,databases=True)
+    management.work_plans.tick(now=1893456001)
+    database=next(t for t in management.tasks() if t['kind']=='databases')
+    management._update(database['id'],state='FINISHED',result={'status':'DB_ONLY'})
+    management.work_plans.tick(now=1893466801)
+    assert len(management.tasks())==2
+    files=next(t for t in management.tasks() if t['kind']=='files')
+    management._update(files['id'],state='FINISHED',result={'status':'FILES_ONLY'})
+    management.work_plans.tick(now=1893466802)
+    assert len(management.tasks())==4
+
+
+def test_recurring_manual_stop_does_not_create_another_version(management):
+    recurring(management)
+    management.work_plans.tick(now=1893456001)
+    task=management.tasks()[0]
+    management._update(task['id'],state='STOPPED')
+    management.work_plans.tick(now=1893466801)
+    assert len(management.tasks())==1
+    assert management.task(task['id'])['state']=='STOPPED'
+
+
+def test_first_file_copy_renews_deadline_without_changing_key(management):
+    recurring(management)
+    task=management.start(1,'files',{})
+    management._update(task['id'],state='FAILED',error_code='TRANSFER_TIMEOUT',
+        first_started_at='2020-01-01T00:00:00+00:00',progress={'received_bytes':12345})
+    assert management._queue_file_resume(task['id'])
+    current=management.task(task['id'])
+    assert current['state']=='SCHEDULED'
+    assert current['first_copy_started_at']=='2020-01-01T00:00:00+00:00'
+    assert current['first_started_at']!='2020-01-01T00:00:00+00:00'
+    assert current['progress']['received_bytes']==12345
+    assert current['auto_resume_count']==1
+
+
+def test_first_copy_selects_largest_previous_partial(management):
+    recurring(management)
+    old=management.start(1,'files',{})
+    management._update(old['id'],state='FAILED',error_code='CONNECTION_FAILED',
+        first_started_at='2020-01-01T00:00:00+00:00',progress={'received_bytes':70000})
+    new=management.start(1,'files',{'fresh_run':True})
+    management._update(new['id'],state='FAILED',error_code='CONNECTION_FAILED',
+        first_started_at='2020-01-01T00:00:00+00:00',progress={'received_bytes':12})
+    management.work_plans.tick(now=1893456001)
+    assert len(management.tasks())==2
+    assert management.task(old['id'])['state']=='SCHEDULED'
+    assert management.task(new['id'])['state']=='FAILED'
+
+
+def test_subset_database_success_does_not_release_file_versions(management):
+    recurring(management,databases=True)
+    management.work_plans.tick(now=1893456001)
+    for task in management.tasks():
+        management._update(task['id'],state='FINISHED',result={'status':'FILES_ONLY' if task['kind']=='files' else 'DB_ONLY'})
+        if task['kind']=='databases':management._update(task['id'],db_aliases=['synthetic-alias'])
+    management.work_plans.tick(now=1893466801)
+    assert len([t for t in management.tasks() if t['kind']=='files'])==1
+
+
+def test_held_new_version_cannot_hide_or_block_initial_partial(management):
+    recurring(management)
+    original=management.start(1,'files',{})
+    management._update(original['id'],state='FAILED',error_code='TRANSFER_TIMEOUT',
+        first_started_at='2020-01-01T00:00:00+00:00',progress={'received_bytes':70000})
+    newer=management.start(1,'files',{'fresh_run':True})
+    management._update(newer['id'],first_copy_wait_for=original['id'],stage='FIRST_COPY_WAIT')
+    assert management.tasks()[0]['id']==original['id']
+    management.work_plans.tick(now=1893456001)
+    assert management.task(original['id'])['state']=='SCHEDULED'
+    assert len(management.tasks())==2
+
+
+def test_reconcile_parks_queued_version_and_continues_advanced_baseline(management):
+    recurring(management)
+    original=management.start(1,'files',{})
+    management._update(original['id'],state='FAILED',error_code='TRANSFER_TIMEOUT',
+        first_started_at='2020-01-01T00:00:00+00:00',progress={'received_bytes':70000})
+    newer=management.start(1,'files',{'fresh_run':True})
+    management.work_plans.reconcile_first_copies()
+    assert management.task(newer['id'])['first_copy_wait_for']==original['id']
+    assert management.task(original['id'])['state']=='SCHEDULED'
+    assert management.tasks()[0]['id']==original['id']
+    management.work_plans.reconcile_first_copies()
+    assert len(management.tasks())==2
+
+
 def test_bulk_plan_queues_files_and_databases_once(management):
     management._schedule=lambda:None
     payload={'rows':[1],'files':True,'databases':True,'every_hours':None,'request_id':'synthetic-request-123'}
