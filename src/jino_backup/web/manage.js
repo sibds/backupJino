@@ -42,6 +42,8 @@
     INTERRUPTED: "Прервано перезапуском",
     SCANNING: "Подсчёт файлов и объёма",
     FILES_DOWNLOAD: "Скачивание файлов",
+    RESUMING_FILES: "Продолжение недокачанных файлов",
+    VERIFICATION_WAIT: "Ожидает очереди проверки",
     AUTHENTICATE: "Подключение и вход",
     ACCESS_VERIFIED: "Доступ подтверждён",
     SELECT_SNAPSHOT: "Выбор снимка MySQL",

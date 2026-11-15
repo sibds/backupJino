@@ -32,6 +32,7 @@ class TaskControl:
         self.condition = threading.Condition()
         self.paused = False
         self.stopped = False
+        self.deferred_verification = False
         self.changed = changed
         self.workers = set()
         self.waiting_workers = set()
@@ -53,7 +54,7 @@ class TaskControl:
 
     def checkpoint(self, *, interrupted=None):
         with self.condition:
-            waiting = self.paused and not self.stopped
+            waiting = self.paused and not self.stopped and not self.deferred_verification
         if waiting:
             with self.condition:
                 self.waiting_workers.add(threading.get_ident())
@@ -75,6 +76,8 @@ class TaskControl:
             if announce:
                 self.changed("RUNNING")
         with self.condition:
+            if self.deferred_verification and not self.stopped:
+                raise BackupError('VERIFICATION_DEFERRED')
             if self.stopped or interrupted and interrupted():
                 raise BackupError("CANCELLED")
 
@@ -82,6 +85,8 @@ class TaskControl:
         with self.condition:
             if action == "stop":
                 self.stopped = True
+            elif action=='defer_verification':
+                self.deferred_verification=True
             else:
                 self.paused = action == "pause"
             self.condition.notify_all()
@@ -122,7 +127,7 @@ class DashboardManagement:
         self.running = set()
         self.closed = False
         self.timer = None
-        self.executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="backup-operator")
+        self.executor = ThreadPoolExecutor(max_workers=7, thread_name_prefix="backup-operator")
         if runner is None:
             from .dashboard_runner import OperatorRunner
 
@@ -512,6 +517,9 @@ class DashboardManagement:
         self.work_plans.tick()
         all_tasks = self.tasks()
         active = [task for task in all_tasks if task["id"] in self.running]
+        verifiers=sorted([task for task in active if self._verifying_only(task) and task['state']=='RUNNING'],key=lambda task:task.get('position',0))
+        for task in verifiers[1:]:
+            self.controls[task['id']].request('defer_verification')
         next_wake = []
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
@@ -524,9 +532,14 @@ class DashboardManagement:
                 if server['binding_revision'] != task['revision']:
                     self._update(task['id'], state='FAILED', auto_resume_at=None, error_code='SERVER_CONFIG_CHANGED')
                     continue
-            limit = 1 if task["kind"] == "databases" else 5
-            if sum(item["kind"] == task["kind"] for item in active) >= limit:
-                continue
+            if task['kind']=='databases':
+                if any(item['kind']=='databases' for item in active):continue
+            else:
+                files=[item for item in active if item['kind']=='files']
+                if len(files)>=6:continue
+                if self._verifying_only(task):
+                    if any(self._verifying_only(item) for item in files):continue
+                elif sum(not self._verifying_only(item) for item in files)>=5:continue
             # ConnectionBudget grants actual leases in the runner. Idle reservations
             # must not prevent other servers from using the free connection slots.
             if any(item["row"] == task["row"] and (
@@ -608,6 +621,10 @@ class DashboardManagement:
                         break
         finally:
             self.scheduling_databases = False
+
+    @staticmethod
+    def _verifying_only(task):
+        return task['kind']=='files' and task.get('transport')=='ftps' and task.get('progress',{}).get('download_phase_complete') is True
 
     def _wake(self):
         with self.lock:
@@ -749,6 +766,7 @@ class DashboardManagement:
     def _run(self, task_id):
         task = self.task(task_id)
         control = self.controls[task_id]
+        deferred=False
         try:
             server = self.catalog.get(task["row"])
             control.checkpoint()
@@ -757,6 +775,8 @@ class DashboardManagement:
             )
             if control.stopped:
                 raise BackupError("CANCELLED")
+            if result.get('error_code')=='VERIFICATION_DEFERRED':
+                raise BackupError('VERIFICATION_DEFERRED')
             failed = result.get("status") in {"FAILED", "CANCELLED"}
             if result.get("error_code") == "CAPTCHA_REQUIRED":
                 self.access_policy.block(task["row"])
@@ -789,7 +809,12 @@ class DashboardManagement:
             )
             if code == "CAPTCHA_REQUIRED":
                 self.access_policy.block(task["row"])
-            self._update(task_id, state="STOPPED" if control.stopped else "FAILED", error_code=code)
+            if code=='VERIFICATION_DEFERRED' and not control.stopped:
+                deferred=True
+                self._update(task_id,state='PAUSED' if control.paused else 'QUEUED',
+                             stage='VERIFICATION_WAIT',error_code=None,result=None)
+            else:
+                self._update(task_id, state="STOPPED" if control.stopped else "FAILED", error_code=code)
         finally:
             with self.lock:
                 task = self.task(task_id)
@@ -801,6 +826,10 @@ class DashboardManagement:
                     task_id=task_id,
                 )
                 self.running.discard(task_id)
+                if deferred:
+                    replacement=TaskControl(lambda state:self._control_state(task_id,state))
+                    if control.paused:replacement.request('pause')
+                    self.controls[task_id]=replacement
                 self._queue_file_resume(task_id)
                 self._queue_database_redownload(task_id)
                 self._schedule()
@@ -875,6 +904,7 @@ class DashboardManagement:
                 'metadata_listing_checks',
                 'processed_files',
                 'local_verifications', 'pending_verifications',
+                'resumed_files', 'cached_directories',
                 "received_bytes",
                 "planned_bytes",
                 "planned_files",
@@ -895,6 +925,9 @@ class DashboardManagement:
                 progress["current_file"] = values["current_file"][:300]
             if type(values.get("inventory_complete")) is bool:
                 progress["inventory_complete"] = values["inventory_complete"]
+            phase_changed=type(values.get('download_phase_complete')) is bool and values['download_phase_complete']!=progress.get('download_phase_complete')
+            if type(values.get('download_phase_complete')) is bool:
+                progress['download_phase_complete']=values['download_phase_complete']
             if isinstance(values.get("active_files"), list):
                 progress["active_files"] = [
                     {"path": item["path"][:2000], "size_bytes": item["size_bytes"],
@@ -928,6 +961,7 @@ class DashboardManagement:
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
                        "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code') if key in values},
                 )
+            if phase_changed:self._schedule()
 
     def close(self):
         with self.lock:

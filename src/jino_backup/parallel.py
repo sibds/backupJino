@@ -12,7 +12,7 @@ from .downloads import local_path
 from .errors import BackupError
 from .retry import retry_call, TRANSIENT_ERRORS
 from .state import private_dir
-from .transfer import name_compatibility_issue, relative_path, source_for, display_remote_path, unsupported_type
+from .transfer import Entry, name_compatibility_issue, relative_path, source_for, display_remote_path, unsupported_type
 
 
 class ConnectionBudget:
@@ -84,6 +84,7 @@ class MetadataSession:
         self.waiting = 0
         self.connected = False
         self.canonical_root = None
+        self.checked_parents = set()
 
     @contextmanager
     def locked(self, low_priority=False):
@@ -136,6 +137,7 @@ class MetadataSession:
     def close(self):
         self.source.__exit__()
         self.connected = False
+        self.checked_parents.clear()
 
     def listdir(self, parent):
         return retry_call(lambda: self.call(lambda: list(self.source.listdir(parent))),
@@ -145,6 +147,15 @@ class MetadataSession:
 
     def stat(self, relative, low_priority=False):
         return self.call(lambda: self.source.stat(relative), low_priority)
+
+    def validate_parents(self,relative,low_priority=False):
+        parts=relative_path(relative).split('/')[:-1]
+        for count in range(1,len(parts)+1):
+            parent='/'.join(parts[:count])
+            if parent in self.checked_parents:continue
+            entry=self.stat(parent,low_priority=low_priority)
+            if entry.kind!='dir':raise BackupError('REMOTE_TYPE_UNSAFE')
+            self.checked_parents.add(parent)
 
 
 class ParallelCollector:
@@ -162,6 +173,7 @@ class ParallelCollector:
         self.verifying = 0
         self.verify_queue = queue.PriorityQueue(maxsize=max_files)
         self.saved_bytes = self.saved_done = 0
+        self.resumed_files = self.cached_directories = 0
 
     def collect(self, credentials, site, snapshot, checkpoint):
         self.snapshot, self.checkpoint = snapshot, checkpoint
@@ -176,6 +188,9 @@ class ParallelCollector:
         self.mutex = threading.RLock()
         self.emit_mutex = threading.RLock()
         self.failure = None
+        self.download_phase_complete = False
+        self.enqueued_paths = set()
+        self.resumed_files = self.cached_directories = 0
         self.items, self.directories, self.errors, self.skipped = [], [], [], []
         self.collisions, self.duplicates, self.local_conflicts = [], [], []
         self.active, self.planned_bytes, self.planned_files, self.directories_seen = {}, 0, 0, 0
@@ -191,6 +206,7 @@ class ParallelCollector:
         checkpoint.on_commit = self.committed_file
         metadata = MetadataSession(self.metadata_factory(credentials, site), site, self.control, self.emit)
         self.metadata = metadata
+        self.emit(stage='RESUMING_FILES')
         barrier = threading.Barrier(self.connections + 1)
 
         def run(scanner=False, index=1, verifier=False):
@@ -201,7 +217,10 @@ class ParallelCollector:
                     self.verify()
                 elif scanner:
                     metadata.open()
+                    from .resume_inventory import ResumeInventory
+                    self.walk=ResumeInventory(checkpoint,metadata.canonical_root,self.max_files)
                     self.ready.set()
+                    self.resume_pending()
                     self.scan()
                 else:
                     self.download(credentials, site, index)
@@ -229,6 +248,8 @@ class ParallelCollector:
                                 future.result()
                         finally:
                             self.downloads_done.set()
+                        self.download_phase_complete=True
+                        self.emit(stage='FILE_VERIFY')
                         verifier.result()
                         if self.collisions or self.local_conflicts:
                             self.reconcile_conflicts(credentials, site)
@@ -242,6 +263,7 @@ class ParallelCollector:
                 checkpoint.validate_inventory(self.items)
             result = {"count": len(self.items), "bytes": sum(item["size_bytes"] for item in self.items),
                       "items": sorted(self.items, key=lambda item: item["path"]),
+                      'inventory_observed_since':self.walk.observed_at,'inventory_resumed':self.walk.resumed,
                       "directories": sorted(self.directories)}
             if self.errors:
                 result["errors"] = self.errors
@@ -251,6 +273,7 @@ class ParallelCollector:
                 result['duplicates'] = self.duplicates
             if checkpoint.retained_items():
                 result['retained_local'] = checkpoint.retained_items()
+            self.walk.finish()
             self.emit(stage="FILES_DOWNLOAD", log=True)
             return result
         finally:
@@ -295,6 +318,9 @@ class ParallelCollector:
                       "inventory_complete": self.inventory_complete,
                       "processed_files": len(getattr(self, 'items', [])),
                       "local_verifications": self.verifying,
+                      "resumed_files": self.resumed_files,
+                      "cached_directories": self.cached_directories,
+                      "download_phase_complete": getattr(self,'download_phase_complete',False),
                       "pending_verifications": pending_checks,
                       "active_files": active, "connections_limit": self.connections,
                       "active_transfers": len(active), **event}
@@ -310,6 +336,41 @@ class ParallelCollector:
                           current_bytes=selected["received_bytes"] if selected else 0)
         self.progress(**values)
 
+    def enqueue(self,path,entry):
+        if path in self.enqueued_paths:return
+        self.enqueued_paths.add(path)
+        while True:
+            self.control.checkpoint()
+            try:
+                self.files_queue.put((path,entry),timeout=0.1)
+                return
+            except queue.Full:pass
+
+    def resume_pending(self):
+        """Old checkpoints are enough to resume bytes before any tree listing."""
+        with self.checkpoint.mutex:
+            rows=list(self.checkpoint.db.execute("SELECT path,size,modified FROM files WHERE state='partial' ORDER BY committed DESC,path"))
+        if len(rows)>self.max_files:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+        if sum(row['size'] for row in rows)>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+        for row in rows:
+            self.control.checkpoint()
+            path=relative_path(row['path'])
+            expected=Entry(posixpath.basename(path),'file',row['size'],row['modified'])
+            if expected.size<0 or expected.size>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+            try:
+                def checked():
+                    self.metadata.validate_parents(path)
+                    return self.metadata.stat(path)
+                actual=retry_call(checked,wait=self.control.wait,
+                    notify=lambda **event:self.emit(metadata_retry=True,**event),phase='RESUMING_FILES')
+            except BackupError as error:
+                if error.code in {'SOURCE_CHANGED','TRANSFER_DENIED','REMOTE_DIRECTORY_UNAVAILABLE'}:continue
+                raise
+            if actual!=expected:continue  # The ordinary walk handles a changed source.
+            self.enqueue(path,actual)
+            self.resumed_files+=1
+            self.emit(stage='RESUMING_FILES')
+
     def scan(self):
         pending, seen = [("", 0)], {}
         while pending:
@@ -319,7 +380,11 @@ class ParallelCollector:
                 raise BackupError("TRANSFER_LIMIT_EXCEEDED")
             self.emit(stage="SCANNING", log=True, directory=parent or "/")
             try:
-                entries = self.metadata.listdir(parent)
+                def listing():
+                    if parent:self.metadata.validate_parents(parent+'/.listing')
+                    return self.metadata.listdir(parent)
+                entries,cached = self.walk.listing(parent,listing)
+                if cached:self.cached_directories+=1
             except BackupError as error:
                 self.emit(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
                           error_code=error.code, **error.details)
@@ -383,6 +448,7 @@ class ParallelCollector:
                               skip_reason=special, error_code="REMOTE_TYPE_UNSUPPORTED")
                     continue
                 if entry.kind == "dir":
+                    if not cached:self.metadata.checked_parents.add(path)
                     try:
                         self.checkpoint.prepare_directory(path,entry)
                     except BackupError as error:
@@ -398,19 +464,18 @@ class ParallelCollector:
                     self.planned_bytes += entry.size
                     if entry.size < 0 or self.planned_bytes > self.max_bytes:
                         raise BackupError("TRANSFER_LIMIT_EXCEEDED")
+                    if path in self.enqueued_paths:continue
                     with self.checkpoint.mutex:
                         saved = self.checkpoint.db.execute('SELECT size,modified FROM files WHERE path=?',(path,)).fetchone()
                     if (self.committed.get(path, (None, 0))[0] == 'done'
                             and saved and saved['size']==entry.size and saved['modified']==entry.modified):
+                        receipt=self.walk.receipt(path,entry)
+                        if receipt:
+                            self.items.append(receipt)
+                            continue
                         self.verify_queue.put_nowait((1, path, entry))
                         continue
-                    while True:
-                        self.control.checkpoint()
-                        try:
-                            self.files_queue.put((path, entry), timeout=0.1)
-                            break
-                        except queue.Full:
-                            pass
+                    self.enqueue(path,entry)
                 else:
                     raise BackupError("REMOTE_TYPE_UNSAFE")
             self.emit(stage="SCANNING")
@@ -431,30 +496,35 @@ class ParallelCollector:
                     return
                 continue
             item = None
+            verified_signature = None
             try:
                 self.emit(stage='FILE_VERIFY', log=True)
                 def once():
-                    nonlocal item
-                    if check_source and self.metadata.stat(path, low_priority=True) != entry:
-                        raise BackupError('SOURCE_CHANGED')
+                    nonlocal item,verified_signature
                     while not self.budget.verification_slot.acquire(timeout=0.1):
                         self.control.checkpoint()
+                    with self.mutex:
+                        self.verifying += 1
                     try:
-                        with self.mutex:
-                            self.verifying += 1
+                        if check_source:
+                            self.metadata.validate_parents(path,low_priority=True)
+                            if self.metadata.stat(path,low_priority=True)!=entry:
+                                raise BackupError('SOURCE_CHANGED')
                         self.emit()
+                        verified_signature=self.walk.signature(path)
                         item = self.checkpoint.verify_done(path, entry, self.control,
                                                           require_modified=bool(check_source))
+                        if check_source and self.metadata.stat(path, low_priority=True) != entry:
+                            raise BackupError('SOURCE_CHANGED')
                     finally:
                         with self.mutex:
                             self.verifying -= 1
                         self.budget.verification_slot.release()
-                    if check_source and self.metadata.stat(path, low_priority=True) != entry:
-                        raise BackupError('SOURCE_CHANGED')
                 retry_call(once, wait=self.control.wait,
                            notify=lambda **event: self.emit(verification_retry=True, **event),
                            phase='FILE_VERIFY')
                 with self.mutex:
+                    self.walk.verified(path,entry,item,verified_signature)
                     self.items.append(item)
             except BackupError as error:
                 self.emit(stage='FILE_ERROR', log=True, current_file=path, error_code=error.code, **error.details)
@@ -509,6 +579,7 @@ class ParallelCollector:
                 try:
                     def once():
                         self.control.checkpoint()
+                        self.metadata.validate_parents(path)
                         saved_local = local.exists()
                         if saved_local and source.stat(path) != entry:
                             raise BackupError('SOURCE_CHANGED')
