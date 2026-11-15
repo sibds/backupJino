@@ -177,6 +177,10 @@ commit_import(approved_candidates) -> ImportedAccountRefs
 
 Приватные `POST /api/plan/bulk`, `POST /api/plan/action` и поле `rules` ответа `GET /api/plan` описаны в [контракте групповых операций и фиксированных расписаний](42_work_plan_bulk_schedules.md). Разовые запросы защищены `request_id`, периодические постановки — `schedule_occurrence`; активные работы сохраняют прежние ключи. Длительности месяцев и года фиксированы по решению пользователя.
 
+## Дополнение: продолжение FTPS
+
+Для управляемого FTPS добавлены `progress.resumed_files`, `cached_directories`, `download_phase_complete`, этапы `RESUMING_FILES` и `VERIFICATION_WAIT`. Ожидание проверки сохраняет `QUEUED` и пустой `error_code`; квитанции и инвентаризация находятся в приватном checkpoint. В `manifest.files` доступны `inventory_observed_since` и `inventory_resumed`. Контракт CLI и значения полноты копии сохранены. [Подробности](46_durable_ftps_resume.md).
+
 ## Дополнение: повтор повреждённого SQL
 
 БД-задание поддерживает `SCHEDULED / DB_REDOWNLOAD_WAIT`, `db_redownload_count` (до трёх), `db_redownload_exhausted` и защищённую внутреннюю ссылку `db_repair_job_id`. Успешные артефакты и прежняя ошибка сохранены в `last_attempt_result`; новый результат не становится успешным до проверки замены. Ошибка известных локальных SQL, включая нарушение размера/SHA-256 в кэше, классифицируется как `DB_INTEGRITY_FAILED`; целостность шифрованного журнала и привязка проверяются отдельно. [Алгоритм, сохранность и пределы](43_database_integrity_redownload.md).
