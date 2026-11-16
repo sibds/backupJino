@@ -75,9 +75,13 @@ class DatabaseInventory:
             artifact=entry.get('artifact') or {}
             stamp=(verified_times or {}).get(alias) or entry.get('verified_at') or ''
             records.append({'path':path,'kind':'file','name':remote.get('name') or entry['name']+'.sql',
+                'relative_path':remote.get('relative_path'),
                 'db_alias':alias,'export_directory_date':snapshot,'size_bytes':remote.get('size_bytes'),
                 'mtime':remote.get('mtime'),'local_verified':artifact.get('validation')=='PASS',
                 'local_size_bytes':artifact.get('size_bytes'),'observed_at':stamp})
+            for ancestor in remote.get('ancestors',[]):
+                records.append({'path':ancestor['path'],'kind':'dir','name':ancestor['name'],
+                    'relative_path':ancestor.get('relative_path'),'export_directory_date':snapshot,'observed_at':stamp})
             marker='/backups/'+str(snapshot)+'/'
             if marker in path:
                 parent=posixpath.dirname(path)

@@ -148,3 +148,26 @@ def test_blocked_server_does_not_get_new_operator_requests(management):
     management._update(task['id'],state='FAILED',error_code='AUTH_FAILED')
     management.catalog.set_flag(1,'blocked',True)
     assert not management._request_operator(task['id'])
+
+
+@pytest.mark.parametrize('new_failure',[False,True])
+def test_skip_during_download_keeps_other_work_and_does_not_hide_new_failure(management,new_failure):
+    import threading
+    entered=threading.Event();release=threading.Event()
+    def runner(server,task,control,progress):
+        progress(stage='FILE_CONFLICT',error_code='FILE_CONFLICT_PENDING',conflict={'id':'d'*64},log=True)
+        entered.set()
+        while not release.wait(.01):control.checkpoint()
+        if new_failure:raise BackupError('TLS_CERTIFICATE_INVALID')
+        return {'status':'PARTIAL','file_conflicts_count':1}
+    management.runner=runner
+    try:
+        task=management.start(1,'files',{});assert entered.wait(2)
+        request=management.task(task['id'])['operator_request']
+        management.resolve_request(task['id'],{'request_id':request['id'],'action':'skip'})
+        assert management.task(task['id'])['state']=='RUNNING'
+        release.set();wait_status(management,task['id'],'WAITING_OPERATOR')
+        current=management.task(task['id'])
+        if new_failure:assert current['operator_request']['code']=='TLS_CERTIFICATE_INVALID'
+        else:assert not current.get('operator_request') and current['operator_deferred']['blocking']
+    finally:release.set()

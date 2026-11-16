@@ -23,7 +23,13 @@ def main():
     management.inventory.discover(1,1,management.catalog.get(1)['account_ref'],['synthetic_database'])
     alias=management.inventory.list(1,1)[0]['db_alias'];candidate_id='a'*64
     management.inventory.save_export_candidates(1,1,database['id'],[{'id':candidate_id,'name':'synthetic_database_'+('long_'*18)+'.sql',
-        'path':'private-synthetic-path','size_bytes':12345678,'mtime':'2026-11-16T10:00:00Z','db_alias':alias,'supported':True,'comparison':'untracked'}])
+        'path':'private-synthetic-path','size_bytes':12345678,'mtime':'2026-11-16T10:00:00Z','db_alias':alias,'supported':True,'comparison':'untracked'},
+        {'id':'e'*64,'name':'reports','relative_path':'reports','kind':'dir','path':'synthetic-directory','size_bytes':None,
+         'supported':False,'selectable':False,'comparison':'known_container','known_children':1,'unknown_children':0},
+        {'id':'f'*64,'name':'old.txt','relative_path':'reports/old.txt','kind':'file','path':'synthetic-text','size_bytes':200,
+         'supported':False,'selectable':False,'comparison':'different','internal':{'size_bytes':100,'mtime':'2026-11-15T00:00:00Z'}},
+        {'id':'0'*64,'name':'removed.sql','kind':'missing','path':'synthetic-missing','size_bytes':100,
+         'supported':False,'selectable':False,'comparison':'missing_remote','internal':{'size_bytes':100}}])
     management._update(database['id'],state='FAILED',error_code='REMOTE_DESTINATION_EXISTS',
         result={'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':1})
     management._request_operator(database['id'])
@@ -55,7 +61,9 @@ def main():
                 expect(page.locator('#operator-notifications')).to_contain_text('Нужно ваше решение · 2')
                 page.locator('#operator-notifications a').filter(has_text='Демонстрационный сервер 1').click()
                 expect(page.locator('#databases-operator-request .operator-request')).to_be_visible()
-                expect(page.locator('#databases-operator-request .export-candidate')).to_contain_text('На Jino:')
+                expect(page.locator('#databases-operator-request .export-candidate').first).to_contain_text('На Jino:')
+                expect(page.locator('#databases-operator-request')).to_contain_text('Папка: reports')
+                expect(page.locator('#databases-operator-request')).to_contain_text('Внутренний перечень:')
                 assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
                 page.evaluate('document.activeElement?.blur();scrollTo(0,0)')
                 page.screenshot(path=str(captures/f'operator-decisions-{width}.png'),full_page=True)

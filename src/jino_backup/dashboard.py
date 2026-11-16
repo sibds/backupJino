@@ -827,7 +827,7 @@ class DashboardData:
         if self.management:
             config = self.management.catalog.get(row)
             server['database_inventory'] = self.management.inventory.list(row, config['binding_revision'])
-            server['export_candidates']={task['id']:[{key:value for key,value in candidate.items() if key!='path'}
+            server['export_candidates']={task['id']:[{key:value for key,value in candidate.items() if key not in {'path','ancestors'}}
                 for candidate in self.management.inventory.export_candidates(row,config['binding_revision'],task['id'])]
                 for task in server['tasks'] if task.get('operator_request')}
             server['databases']['verified_count'] = max(server['databases'].get('verified_count', 0), sum(x.get('validation') == 'PASS' for x in server['database_inventory']))

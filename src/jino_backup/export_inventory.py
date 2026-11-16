@@ -7,9 +7,9 @@ from .file_conflicts import modified_timestamp
 
 
 def list_export_entries(read,initial,scope,max_nodes=10000,max_depth=32,control=None):
-    pending=[('',list(initial),0)];rows=[];visited=set()
+    pending=[('',list(initial),0,[])];rows=[];visited=set()
     while pending:
-        parent,items,depth=pending.pop()
+        parent,items,depth,ancestors=pending.pop()
         for item in items:
             if control:control()
             name=item.get('name')
@@ -26,6 +26,7 @@ def list_export_entries(read,initial,scope,max_nodes=10000,max_depth=32,control=
             match=next((db for db in scope['databases'] if regular and name==db+'.sql'),None)
             row={'id':hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest(),
                  'path':path,'name':name,'relative_path':relative,'kind':kind,
+                 'ancestors':ancestors,
                  'size_bytes':size,'mtime':item.get('mtime'),'database_name':match,
                  'selectable':regular and name.endswith('.sql'),'supported':match is not None}
             rows.append(row)
@@ -42,7 +43,7 @@ def list_export_entries(read,initial,scope,max_nodes=10000,max_depth=32,control=
                 if error.code in {'CANCELLED','VERIFICATION_DEFERRED'}:raise
                 row['listing_error']=error.code
                 continue
-            pending.append((relative,children,depth+1))
+            pending.append((relative,children,depth+1,[*ancestors,{'name':name,'path':path,'relative_path':relative}]))
     return rows
 
 
@@ -63,7 +64,7 @@ def reconcile_export_entries(observed,known):
     for path,internal in records.items():
         if path in seen:continue
         rows.append({'id':hashlib.sha256(('missing:'+path).encode()).hexdigest(),'path':path,
-            'name':internal.get('name','Учтённый SQL'),'relative_path':internal.get('name','Учтённый SQL'),
+            'name':internal.get('name','Учтённый SQL'),'relative_path':internal.get('relative_path') or internal.get('name','Учтённый SQL'),
             'kind':'missing','size_bytes':internal.get('size_bytes'),'mtime':internal.get('mtime'),
             'supported':False,'selectable':False,'db_alias':internal.get('db_alias'),
             'internal':{key:internal.get(key) for key in ('size_bytes','mtime','local_verified','local_size_bytes')},

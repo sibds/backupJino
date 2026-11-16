@@ -51,3 +51,33 @@ def test_collision_always_collects_inventory_before_operator_question(tmp_path):
     assert result['candidates_count']==3 and inspected
     assert result['databases_count']==1  # The unrelated database continued.
     assert panel.deleted==[]
+
+
+def test_registry_metadata_is_encrypted_and_compared_with_numeric_times(tmp_path):
+    from cryptography.fernet import Fernet
+    from jino_backup.database_inventory import DatabaseInventory
+    inventory=DatabaseInventory(tmp_path/'private.sqlite3',Fernet.generate_key())
+    inventory.remember_exports(1,1,'2026-11-16',{'db-a':{'name':'private_database_name',
+        'remote':{'path':'/backups/2026-11-16/folder/private.sql','size_bytes':10,'mtime':1700000000},
+        'artifact':{'validation':'PASS','size_bytes':10}}})
+    rows=inventory.reconcile_exports(1,1,'2026-11-16',[
+        {'path':'/backups/2026-11-16/folder','kind':'dir','relative_path':'folder'},
+        {'path':'/backups/2026-11-16/folder/private.sql','kind':'file','relative_path':'folder/private.sql','size_bytes':10,'mtime':1700000000}])
+    assert rows[0]['comparison']=='known_container' and rows[1]['comparison']=='same_metadata'
+    assert b'private.sql' not in inventory.path.read_bytes()
+
+
+def test_nested_sql_rechecks_parent_chain_before_download():
+    from jino_backup.panel import JinoPanelBrowser
+    panel=JinoPanelBrowser.__new__(JinoPanelBrowser)
+    parent={'type':'dir','name':'folder','path':'folder-token'}
+    panel._export_listing=lambda scope:[parent]
+    calls=[]
+    panel._list=lambda token:calls.append(token) or [{'type':'file','name':'one.sql','path':'file-token','size':10,'mtime':'1'}]
+    panel._tasks_idle=lambda:True
+    panel.check_existing_export({}, {'path':'file-token','size_bytes':10,'mtime':'1','ancestors':[{'name':'folder','path':'folder-token'}]})
+    assert calls==['folder-token']
+    parent['targetType']='dir'
+    import pytest
+    with pytest.raises(BackupError):
+        panel.check_existing_export({}, {'path':'file-token','size_bytes':10,'mtime':'1','ancestors':[{'name':'folder','path':'folder-token'}]})

@@ -221,7 +221,7 @@
         if (kind==='dir') item.append(node('p','helper','Учтённых вложенных объектов: '+count(candidate.known_children || 0)+' · новых: '+count(candidate.unknown_children || 0)));
         if (candidate.listing_error) item.append(node('p','notice warning','Не удалось прочитать содержимое: '+candidate.listing_error+'. Остальной перечень доступен.'));
         const local=(detail.server.database_inventory || []).find(db=>db.db_alias===candidate.db_alias && db.validation==='PASS');
-        item.append(node('p','helper',local ? 'Локально проверено: '+bytes(local.size_bytes)+' · дата снимка '+(local.snapshot_date || 'не подтверждена')+' · скачано '+dateLabel(local.downloaded_at) : 'Проверенной локальной копии для сравнения нет.'));
+        if (kind==='file' && filename.endsWith('.sql')) item.append(node('p','helper',local ? 'Локально проверено: '+bytes(local.size_bytes)+' · дата снимка '+(local.snapshot_date || 'не подтверждена')+' · скачано '+dateLabel(local.downloaded_at) : 'Проверенной локальной копии для сравнения нет.'));
         const selectable=candidate.selectable!==false && kind==='file' && !candidate.listing_error;
         const assignable=selectable && !candidate.db_alias && filename.endsWith('.sql');
         if (assignable) {

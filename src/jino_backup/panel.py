@@ -463,7 +463,15 @@ class JinoPanelBrowser:
         return list_export_entries(self._list,self._export_listing(scope),scope,control=getattr(self,'control',None))
 
     def check_existing_export(self,scope,remote):
-        matches=[item for item in self._export_listing(scope) if item.get('path')==remote['path']]
+        items=self._export_listing(scope)
+        for ancestor in remote.get('ancestors',[]):
+            matches=[item for item in items if item.get('path')==ancestor['path'] and item.get('name')==ancestor['name']]
+            if len(matches)!=1:raise BackupError('SOURCE_CHANGED')
+            parent=matches[0]
+            if parent.get('type')!='dir' or parent.get('targetType') is not None or parent.get('targetDisplayPath') is not None:
+                raise BackupError('REMOTE_PATH_UNSAFE')
+            items=self._list(parent['path'])
+        matches=[item for item in items if item.get('path')==remote['path']]
         if len(matches)!=1:raise BackupError('SOURCE_CHANGED')
         item=matches[0]
         if (item.get('type')!='file' or item.get('targetType') is not None or item.get('targetDisplayPath') is not None
