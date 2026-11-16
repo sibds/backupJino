@@ -155,7 +155,7 @@ class PanelFileSource:
 class PanelFileJob:
     def __init__(self,destination,server_id,folder_name,batch_id,source_factory,*,
                  notify=None,max_bytes=1024**4,max_files=1000000,timeout_seconds=86400,state_dir=None,
-                 skip_unsupported_names=False):
+                 skip_unsupported_names=False,refresh_changed_sources=False,conflict_decision=None):
         self.destination=Path(destination).absolute()
         self.server_id,self.folder_name=server_id,folder_name
         self.job_id=identity('download',batch_id,'https-panel')
@@ -165,6 +165,8 @@ class PanelFileJob:
         self.max_bytes,self.max_files,self.timeout_seconds=max_bytes,max_files,timeout_seconds
         self.state_dir=Path(state_dir) if state_dir else None
         self.skip_unsupported_names=skip_unsupported_names
+        self.refresh_changed_sources=refresh_changed_sources
+        self.conflict_decision=conflict_decision or (lambda key:None)
 
     def run(self):
         with ExitStack() as stack:
@@ -174,6 +176,9 @@ class PanelFileJob:
             server=stack.enter_context(server_work(self.destination,self.server_id,self.folder_name,'files'))
             output=local_path(server,self.job_id)
             with DirectoryCheckpoint(output,self.scope,self.notify) as progress:
+                progress.refresh_changed_sources=self.refresh_changed_sources
+                progress.resolve_conflicts=self.refresh_changed_sources
+                progress.conflict_decision=self.conflict_decision
                 manifest_path=local_path(output,'manifest.json')
                 if manifest_path.exists():
                     manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
@@ -208,6 +213,7 @@ class PanelFileJob:
         return {'status':manifest['status'],'job_id':self.job_id,'server_id':self.server_id,
                 'files_count':manifest['files']['count'],'files_bytes':manifest['files']['bytes'],
                 'file_errors_count':len(manifest['files'].get('errors',[])),
+                'source_changed_count':sum(error.get('error_code')=='SOURCE_CHANGED' for error in manifest['files'].get('errors',[])),
                 'files_skipped_count':len(manifest['files'].get('skipped',[])),
                 'links_count':len(manifest.get('links',{})),'already_downloaded':already,
                 'backup_complete':False,'capture_consistency':'BEST_EFFORT'}

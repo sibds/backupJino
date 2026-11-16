@@ -876,7 +876,10 @@ class DashboardManagement:
 
     def _queue_file_resume(self, task_id):
         task = self.task(task_id)
-        if self.closed or task['kind'] != 'files' or task['state'] not in {'FAILED','INTERRUPTED'} or task.get('error_code') not in AUTO_FILE_ERRORS:
+        changing=(task['state']=='FINISHED' and (task.get('result') or {}).get('status')=='PARTIAL'
+                  and (task.get('result') or {}).get('source_changed_count',0)>0)
+        code='SOURCE_CHANGED' if changing else task.get('error_code')
+        if self.closed or task['kind'] != 'files' or (not changing and (task['state'] not in {'FAILED','INTERRUPTED'} or code not in AUTO_FILE_ERRORS)):
             return False
         control = self.controls.get(task_id)
         if control and (control.stopped or control.paused): return False
@@ -899,13 +902,14 @@ class DashboardManagement:
         due = time.time()+AUTO_FILE_DELAYS[min(attempt-1,len(AUTO_FILE_DELAYS)-1)]
         scheduled = iso_time(due)
         progress.update(active_files=[],active_transfers=0,current_file='',retry_at=None,retry_delay_seconds=0)
-        self._update(task_id, state='SCHEDULED', stage='AUTO_RESUME_WAIT', scheduled_at=scheduled,
+        stage='SOURCE_REFRESH_WAIT' if changing else 'AUTO_RESUME_WAIT'
+        self._update(task_id, state='SCHEDULED', stage=stage, scheduled_at=scheduled,
                      next_at=scheduled, auto_resume_at=scheduled, auto_resume_count=attempt,
-                     auto_resume_bytes=saved, auto_resume_error=task['error_code'], first_started_at=first,
+                     auto_resume_bytes=saved, auto_resume_error=code, first_started_at=first,
                      last_attempt_result=task.get('result'), result=None, error_code=None, progress=progress,
                      ftp_connections=server['ftp_connections'], skip_unsupported_names=server['skip_unsupported_names'])
         self.controls[task_id] = TaskControl(lambda state:self._control_state(task_id,state))
-        self.event(task['row'],'AUTO_RESUME_WAIT',kind='files',code=task['error_code'],task_id=task_id)
+        self.event(task['row'],stage,kind='files',code=code,task_id=task_id)
         return True
 
     def progress(self, task_id, values):

@@ -1,6 +1,7 @@
 """Private, durable directory observations for an interrupted FTPS walk."""
 import hashlib
 import json
+import posixpath
 from dataclasses import asdict
 from datetime import datetime,timezone
 
@@ -54,6 +55,29 @@ class ResumeInventory:
     def finish(self):
         with self.checkpoint.mutex,self.checkpoint.db:
             self.checkpoint.db.execute('UPDATE walk_state SET finished=1 WHERE id=1')
+
+    def invalidate_directory(self,path):
+        relative_path(path)
+        with self.checkpoint.mutex,self.checkpoint.db:
+            for directory in {path,posixpath.dirname(path)}:
+                self.checkpoint.db.execute('DELETE FROM walk_listings WHERE path=?',(directory,))
+
+    def update_entry(self,path,entry):
+        """Replace one stale observation without discarding completed siblings."""
+        parent,name=posixpath.split(relative_path(path))
+        if entry.name!=name:raise BackupError('REMOTE_PATH_UNSAFE')
+        with self.checkpoint.mutex,self.checkpoint.db:
+            db=self.checkpoint.db
+            saved=db.execute('SELECT payload,checksum FROM walk_listings WHERE path=?',(parent,)).fetchone()
+            if saved:
+                if hashlib.sha256(saved[0].encode()).hexdigest()!=saved[1]:raise BackupError('LOCAL_PROGRESS_INVALID')
+                entries=json.loads(saved[0])
+                entries=[value for value in entries if value['name']!=name]+[asdict(entry)]
+                if len(entries)>self.max_files:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                payload=json.dumps(entries,ensure_ascii=True)
+                db.execute('UPDATE walk_listings SET payload=?,checksum=? WHERE path=?',
+                           (payload,hashlib.sha256(payload.encode()).hexdigest(),parent))
+            db.execute('DELETE FROM walk_verified WHERE path=?',(path,))
 
     def signature(self,path):
         try:stat=self.checkpoint.file_path(path).stat()

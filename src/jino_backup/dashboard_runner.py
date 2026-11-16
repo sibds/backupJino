@@ -82,7 +82,7 @@ class ControlledSource:
                 except BackupError as error:
                     self.progress(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
                                   error_code=error.code, **error.details)
-                    if not parent or not self.continue_on_error or error.code != "REMOTE_DIRECTORY_UNAVAILABLE":
+                    if not parent or not self.continue_on_error or error.code not in {'REMOTE_DIRECTORY_UNAVAILABLE','SOURCE_CHANGED'}:
                         raise
                     self.inventory_errors[parent] = error
                     continue
@@ -224,6 +224,7 @@ class OperatorRunner:
                     if task["transport"] != "ftps" else None,
                     continue_on_error=True,
                     resolve_conflicts=True,
+                    refresh_changed_sources=True,
                     conflict_decision=lambda key:self.data.management.task(task['id']).get('conflict_decisions',{}).get(key),
                     conflict_notify=progress,
                     skip_unsupported_names=skip_names,
@@ -285,6 +286,9 @@ class OperatorRunner:
                     timeout_seconds=remaining,
                     state_dir=self.data.state_dir,
                     skip_unsupported_names=skip_names,
+                    refresh_changed_sources=True,
+                    conflict_decision=lambda key:self.data.management.task(task['id']).get('conflict_decisions',{}).get(key),
+                    notify=lambda event:progress(log=True,**event),
                 ).run()
                 self._file_totals(output, progress)
                 return result

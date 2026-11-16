@@ -103,7 +103,8 @@ def reconcile(checkpoint, source, remote, entry, deadline, *, peer=None):
         local_at = modified_timestamp(previous['modified']) if owned else None
         newer = peer == remote and remote_at is not None and local_at is not None and remote_at > local_at
         details['remote_newer'] = newer
-        if decision not in {'keep_both', 'use_remote', 'keep_local'} and not newer:
+        refresh_owned = checkpoint.refresh_changed_sources and owned and peer == remote
+        if decision not in {'keep_both', 'use_remote', 'keep_local'} and not newer and not refresh_owned:
             raise BackupError('FILE_CONFLICT_PENDING', conflict=details)
         if decision == 'keep_local':
             raise BackupError('FILE_CONFLICT_SKIPPED', conflict=details)

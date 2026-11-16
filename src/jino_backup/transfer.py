@@ -224,8 +224,8 @@ class FtpsSource:
                             raise BackupError('REMOTE_LIST_INVALID', operation=operation)
                         facts[key] = value
                     if reported not in {name, posixpath.join(canonical, name)}:
-                        raise BackupError('SOURCE_CHANGED', operation=operation)
-                    if not {'type','modify'} <= facts.keys() or facts.get('type','').lower() == 'file' and 'size' not in facts:
+                        self.mlst_supported = False  # Ignore ambiguous reply; strictly list the requested parent.
+                    if not self.mlst_supported or not {'type','modify'} <= facts.keys() or facts.get('type','').lower() == 'file' and 'size' not in facts:
                         self.mlst_supported = False  # Insufficient facts: use the strict MLSD fallback.
                     else:
                         size = int(facts.get('size', '0'))
@@ -398,10 +398,17 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
         if depth > 64:
             raise BackupError("TRANSFER_LIMIT_EXCEEDED")
         try:
-            entries = list(source.listdir(parent)) if hasattr(source, 'retry_file') else retry_call(
-                lambda: list(source.listdir(parent)), reconnect=getattr(source, 'reconnect', None), phase='SCANNING')
+            for refresh in range(3):
+                try:
+                    entries = list(source.listdir(parent)) if hasattr(source, 'retry_file') else retry_call(
+                        lambda: list(source.listdir(parent)), reconnect=getattr(source, 'reconnect', None), phase='SCANNING')
+                    break
+                except BackupError as changed:
+                    if changed.code!='SOURCE_CHANGED' or not checkpoint or not checkpoint.refresh_changed_sources or refresh==2:raise
         except BackupError as error:
-            if not parent or not continue_on_error or error.code != "REMOTE_DIRECTORY_UNAVAILABLE":
+            isolated=error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
+                error.code=='SOURCE_CHANGED' and checkpoint and checkpoint.refresh_changed_sources)
+            if not parent or not continue_on_error or not isolated:
                 raise
             errors.append({'path':parent, 'kind':'dir', 'error_code':error.code, **error.details})
             continue
@@ -480,12 +487,18 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                 raise BackupError("STORAGE_SPACE_LOW")
             try:
                 def copy_once():
-                    nonlocal local
+                    nonlocal local,entry,planned
                     if time.monotonic() > deadline:
                         raise BackupError("TRANSFER_TIMEOUT")
                     current = source.stat(relative)
                     if current != entry:
-                        raise BackupError("SOURCE_CHANGED")
+                        if not checkpoint or not checkpoint.refresh_changed_sources or current.kind!='file':
+                            raise BackupError("SOURCE_CHANGED")
+                        if current.name!=entry.name:raise BackupError('REMOTE_PATH_UNSAFE')
+                        planned+=current.size-entry.size
+                        if current.size<0 or planned>max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                        entry=current
+                        checkpoint.notify({'stage':'SOURCE_REFRESH','current_file':relative})
                     if checkpoint is not None:
                         checkpoint.fetch(source, relative, entry, local, deadline)
                         local = checkpoint.file_path(relative)
@@ -496,11 +509,16 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                             source.download(relative, BoundedWriter(stream, entry.size - offset, deadline), offset)
                     if local.stat().st_size != entry.size or source.stat(relative) != entry:
                         raise BackupError("SOURCE_CHANGED")
-                recover = getattr(source, 'retry_file', None)
-                if recover:
-                    recover(copy_once)
-                else:
-                    retry_call(copy_once, reconnect=getattr(source, 'reconnect', None))
+                for refresh in range(3):
+                    try:
+                        recover = getattr(source, 'retry_file', None)
+                        if recover:
+                            recover(copy_once)
+                        else:
+                            retry_call(copy_once, reconnect=getattr(source, 'reconnect', None))
+                        break
+                    except BackupError as changed:
+                        if changed.code!='SOURCE_CHANGED' or not checkpoint or not checkpoint.refresh_changed_sources or refresh==2:raise
             except BackupError as exc:
                 if not continue_on_error or exc.code not in {'SOURCE_CHANGED','TRANSFER_DENIED',
                         'LOCAL_FILE_CHANGED','LOCAL_PROGRESS_INVALID','FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:

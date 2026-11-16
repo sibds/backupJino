@@ -45,7 +45,17 @@ def test_unsupported_mlst_falls_back_once_and_retains_strict_listing_checks():
     '250-Listing\n type=file;size=abc;modify=1; example.txt\n250 End',
 ])
 def test_ambiguous_or_invalid_mlst_is_not_accepted(reply):
-    with pytest.raises(BackupError): source(reply).stat('example.txt')
+    value=source(reply)
+    value.listdir=lambda path:[]
+    with pytest.raises(BackupError):value.stat('example.txt')
+
+
+def test_mlst_unexpected_name_uses_strict_listing_of_requested_parent():
+    value=source('250-Listing\n type=file;size=12;modify=1; /unexpected/name\n250 End')
+    paths=[]
+    value.listdir=lambda parent:paths.append(parent) or [Entry('example.txt','file',12,'1')]
+    assert value.stat('example.txt')==Entry('example.txt','file',12,'1')
+    assert paths==['']
 
 
 def test_mlst_still_verifies_parent_root_before_querying_file():

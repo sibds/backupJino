@@ -120,7 +120,7 @@ class MetadataSession:
                     self.source.__enter__()
                     canonical = getattr(self.source, "canonical_root", self.site["remote_root"])
                     if self.canonical_root is not None and canonical != self.canonical_root:
-                        raise BackupError("SOURCE_CHANGED")
+                        raise BackupError("DOWNLOAD_SCOPE_CHANGED")
                     self.canonical_root = canonical
                     self.connected = True
                 return operation()
@@ -274,7 +274,7 @@ class ParallelCollector:
                 result['duplicates'] = self.duplicates
             if checkpoint.retained_items():
                 result['retained_local'] = checkpoint.retained_items()
-            self.walk.finish()
+            if not self.errors:self.walk.finish()
             self.emit(stage="FILES_DOWNLOAD", log=True)
             return result
         finally:
@@ -384,12 +384,23 @@ class ParallelCollector:
                 def listing():
                     if parent:self.metadata.validate_parents(parent+'/.listing')
                     return self.metadata.listdir(parent)
-                entries,cached = self.walk.listing(parent,listing)
+                for attempt in range(3):
+                    try:
+                        entries,cached = self.walk.listing(parent,listing)
+                        break
+                    except BackupError as changed:
+                        if changed.code!='SOURCE_CHANGED' or not self.checkpoint.refresh_changed_sources:raise
+                        self.walk.invalidate_directory(parent)
+                        self.metadata.checked_parents.discard(parent)
+                        if attempt==2:raise
+                        self.emit(stage='SOURCE_REFRESH',log=True,directory=parent or '/')
                 if cached:self.cached_directories+=1
             except BackupError as error:
                 self.emit(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
                           error_code=error.code, **error.details)
-                if not parent or not self.continue_on_error or error.code != "REMOTE_DIRECTORY_UNAVAILABLE":
+                isolated = error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
+                    error.code=='SOURCE_CHANGED' and self.checkpoint.refresh_changed_sources)
+                if not parent or not self.continue_on_error or not isolated:
                     raise
                 self.incomplete = True
                 self.errors.append({"path": parent, "kind": "dir", "error_code": error.code, **error.details})
@@ -543,6 +554,23 @@ class ParallelCollector:
                 self.verify_queue.task_done()
                 self.emit()
 
+    def refresh_entry(self,path,previous):
+        self.control.checkpoint()
+        current=retry_call(lambda:self.metadata.stat(path),wait=self.control.wait,
+                           notify=lambda **event:self.emit(metadata_retry=True,**event),phase='SOURCE_REFRESH')
+        if current.kind!='file':raise BackupError('SOURCE_CHANGED')
+        if current.size<0 or current.size>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+        if current!=previous:
+            with self.mutex:
+                delta=current.size-previous.size
+                if self.planned_bytes+max(0,delta)>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                self.planned_bytes=max(0,self.planned_bytes+delta)
+                for active in self.active.values():
+                    if active['path']==path:active['size_bytes']=current.size
+                self.walk.update_entry(path,current)
+            self.emit(stage='SOURCE_REFRESH',log=True,current_file=path)
+        return current
+
     def download(self, credentials, site, index):
         while not self.ready.wait(0.1):
             self.control.checkpoint()
@@ -589,9 +617,15 @@ class ParallelCollector:
                         self.checkpoint.fetch(source, path, entry, local, self.control.deadline)
                         if saved_local and source.stat(path) != entry:
                             raise BackupError('SOURCE_CHANGED')
-                    retry_call(once, reconnect=getattr(source, "reconnect", None), wait=self.control.wait,
-                               notify=lambda **event: self.emit(current_file=path, **event),
-                               progress=lambda: self.checkpoint.committed_offset(path), phase="FILES_DOWNLOAD")
+                    for refresh in range(3):
+                        try:
+                            retry_call(once, reconnect=getattr(source, "reconnect", None), wait=self.control.wait,
+                                       notify=lambda **event: self.emit(current_file=path, **event),
+                                       progress=lambda: self.checkpoint.committed_offset(path), phase="FILES_DOWNLOAD")
+                            break
+                        except BackupError as changed:
+                            if changed.code!='SOURCE_CHANGED' or not self.checkpoint.refresh_changed_sources or refresh==2:raise
+                            entry=self.refresh_entry(path,entry)
                     # Source was checked by fetch; verify the written artifact separately.
                     self.verify_queue.put_nowait((0, path, entry))
                 except BackupError as error:
@@ -621,6 +655,7 @@ class ParallelCollector:
             for path, entry in self.local_conflicts:
                 self.control.checkpoint()
                 try:
+                    if self.checkpoint.refresh_changed_sources:entry=self.refresh_entry(path,entry)
                     if source.stat(path) != entry:
                         raise BackupError('SOURCE_CHANGED')
                     self.checkpoint.fetch(source,path,entry,None,self.control.deadline)
