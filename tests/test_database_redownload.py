@@ -60,6 +60,21 @@ def test_database_integrity_failure_schedules_bounded_same_task_redownload(manag
     assert management.task(task['id'])['db_redownload_exhausted']
 
 
+@pytest.mark.parametrize('code',['EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT'])
+def test_database_timeouts_keep_same_task_retrying_without_age_or_attempt_limit(management,code):
+    management._schedule=lambda:None
+    task=management.start(1,'databases',{})
+    for attempt in range(1,9):
+        management._update(task['id'],state='FAILED',error_code=code,
+                           first_started_at='2020-01-01T00:00:00+00:00',workflow_key='same-copy')
+        assert management._queue_database_redownload(task['id'])
+        current=management.task(task['id'])
+        assert current['state']=='SCHEDULED'
+        assert current['workflow_key']=='same-copy'
+        assert current['first_started_at']=='2020-01-01T00:00:00+00:00'
+        assert len(management.tasks())==1
+
+
 def test_corrupt_cached_copy_identifies_owned_journal_for_redownload(tmp_path):
     from jino_backup.account_batch import completed_database_copy
     panel=PanelFixture(); key=Fernet.generate_key(); instance=workflow(tmp_path,panel,key)

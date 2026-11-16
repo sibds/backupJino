@@ -987,27 +987,29 @@ class DashboardManagement:
 
     def _queue_database_redownload(self,task_id):
         task=self.task(task_id)
+        timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT'}
         if (self.closed or task['kind']!='databases' or task['state']!='FAILED'
-                or task.get('error_code')!='DB_INTEGRITY_FAILED'): return False
+                or (not timed_out and task.get('error_code')!='DB_INTEGRITY_FAILED')
+                or (task.get('operator_deferred') or {}).get('blocking')): return False
         control=self.controls.get(task_id)
         if control and (control.stopped or control.paused): return False
         server=self.catalog.get(task['row'],include_deleted=True)
         if server['blocked'] or server['deleted'] or server['binding_revision']!=task['revision']: return False
         latest=next(t for t in self.tasks(task['row']) if t['kind']=='databases')
         if latest['id']!=task_id: return False
-        count=task.get('db_redownload_count',0)
-        if count>=3:
+        count=task.get('db_timeout_count' if timed_out else 'db_redownload_count',0)
+        if not timed_out and count>=3:
             self._update(task_id,db_redownload_exhausted=True)
             return False
-        due=time.time()+(300,900,3600)[count]
+        due=time.time()+(300,900,3600)[min(count,2)]
         policy=self.access_policy.snapshot()
         if not policy['blocked']: due=max(due,policy['next_timestamp'])
         when=iso_time(due)
         self._update(task_id,state='SCHEDULED',stage='DB_REDOWNLOAD_WAIT',scheduled_at=when,next_at=when,
-                     db_redownload_count=count+1,db_redownload_exhausted=False,
-                     last_attempt_result=task.get('result'),result=None,error_code=None)
+                     **({'db_timeout_count':count+1} if timed_out else {'db_redownload_count':count+1}),db_redownload_exhausted=False,
+                     last_attempt_result=task.get('result'),result=None,error_code=None,operator_request=None)
         self.controls[task_id]=TaskControl(lambda state:self._control_state(task_id,state))
-        self.event(task['row'],'DB_REDOWNLOAD_WAIT',kind='databases',code='DB_INTEGRITY_FAILED',task_id=task_id)
+        self.event(task['row'],'DB_REDOWNLOAD_WAIT',kind='databases',code=task.get('error_code'),task_id=task_id)
         return True
 
     def _queue_file_resume(self, task_id):
