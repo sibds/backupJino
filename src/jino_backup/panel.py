@@ -420,6 +420,7 @@ class JinoPanelBrowser:
         from .panel_files import listing_page
         entries=[]
         while True:
+            if getattr(self,'control',None):self.control()
             variables={**self.listing_payload['variables'],'path':path,'start':len(entries),'count':200}
             page,total=listing_page(self._graphql(self.listing_payload['query'],variables))
             if total>100000 or not page and len(entries)<total:
@@ -458,17 +459,8 @@ class JinoPanelBrowser:
         if variables.get('objectId')!=scope['container_id'] or variables.get('serviceName')!='hosting':
             raise BackupError('PROFILE_UNVERIFIED')
         self.listing_payload=payload
-        items=[]
-        for item in self._export_listing(scope):
-            if (item.get('type')!='file' or item.get('targetType') is not None or item.get('targetDisplayPath') is not None
-                    or not isinstance(item.get('path'),str) or type(item.get('size')) is not int or item['size']<=0):continue
-            signature=[scope['snapshot_ref'],item['path'],item['size'],item.get('mtime')]
-            name=item.get('name','')
-            match=next((db for db in scope['databases'] if name==db+'.sql'),None)
-            items.append({'id':hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest(),
-                          'path':item['path'],'name':name,'size_bytes':item['size'],'mtime':item.get('mtime'),
-                          'database_name':match,'supported':match is not None})
-        return items
+        from .export_inventory import list_export_entries
+        return list_export_entries(self._list,self._export_listing(scope),scope,control=getattr(self,'control',None))
 
     def check_existing_export(self,scope,remote):
         matches=[item for item in self._export_listing(scope) if item.get('path')==remote['path']]

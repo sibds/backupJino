@@ -312,15 +312,20 @@ class OperatorRunner:
                 raise BackupError('DATABASE_SCOPE_UNVERIFIED')
             selected_scope = dict(scope, databases=[name for alias,name in names.items() if selected is None or alias in selected])
             existing_exports=None
-            if task.get('export_handling')=='inspect':
-                candidates=panel.export_candidates(scope)
+            def reconcile_exports(active_panel,export_scope,entries):
+                if entries:inventory.remember_exports(server['row'],server['binding_revision'],snapshot,entries)
+                candidates=active_panel.export_candidates(export_scope)
+                candidates=inventory.reconcile_exports(server['row'],server['binding_revision'],snapshot,candidates)
                 for candidate in candidates:
                     name=candidate.get('database_name')
                     alias=identity('db',server['account_ref'],name) if name else None
                     candidate['db_alias']=alias
-                    candidate['supported']=bool(alias and (selected is None or alias in selected))
+                    candidate['supported']=bool(alias and candidate.get('selectable',True) and (selected is None or alias in selected))
                 inventory.save_export_candidates(server['row'],server['binding_revision'],task['id'],candidates)
-                return {'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':len(candidates)}
+                return len(candidates)
+            if task.get('export_handling')=='inspect':
+                count=reconcile_exports(panel,scope,{})
+                return {'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':count,'inventory_reconciled':True}
             if task.get('export_handling')=='selected':
                 decisions=task.get('export_decisions',{})
                 existing_exports={candidate['db_alias']:{**candidate,'decision':decisions[candidate['id']]}
@@ -403,6 +408,8 @@ class OperatorRunner:
                 resume_job_id=task.get('db_repair_job_id'),
                 existing_exports=existing_exports,
                 defer_export_conflicts=True,
+                inventory_callback=lambda entries,date:inventory.remember_exports(server['row'],server['binding_revision'],date,entries),
+                collision_callback=reconcile_exports,
             ).run()
 
     @staticmethod

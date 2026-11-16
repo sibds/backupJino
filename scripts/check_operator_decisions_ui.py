@@ -23,7 +23,7 @@ def main():
     management.inventory.discover(1,1,management.catalog.get(1)['account_ref'],['synthetic_database'])
     alias=management.inventory.list(1,1)[0]['db_alias'];candidate_id='a'*64
     management.inventory.save_export_candidates(1,1,database['id'],[{'id':candidate_id,'name':'synthetic_database_'+('long_'*18)+'.sql',
-        'path':'private-synthetic-path','size_bytes':12345678,'mtime':'2026-11-16T10:00:00Z','db_alias':alias,'supported':True}])
+        'path':'private-synthetic-path','size_bytes':12345678,'mtime':'2026-11-16T10:00:00Z','db_alias':alias,'supported':True,'comparison':'untracked'}])
     management._update(database['id'],state='FAILED',error_code='REMOTE_DESTINATION_EXISTS',
         result={'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':1})
     management._request_operator(database['id'])
@@ -62,6 +62,7 @@ def main():
                 if width==390:
                     page.evaluate("""async()=>{
                       const data=await (await fetch('/api/state')).json();const original=data.servers[0].tasks[0];
+                      delete data.servers[0].latest_tasks;
                       for(let i=0;i<20;i++)data.servers[0].tasks.push({...original,id:'synthetic-extra-'+i,operator_request:{...original.operator_request,id:'extra-'+i}});
                       document.dispatchEvent(new CustomEvent('backup:state',{detail:data}));
                     }""")
@@ -73,6 +74,11 @@ def main():
             page=browser.new_page(viewport={'width':1440,'height':1050});page.on('pageerror',lambda error:errors.append(str(error)))
             page.route('**/*',guard);page.goto(base,wait_until='networkidle')
             page.locator('#operator-notifications a').filter(has_text='Демонстрационный сервер 1').click()
+            page.get_by_role('button',name='Пропустить',exact=True).evaluate('(button)=>{button.click();button.click()}')
+            expect(page.locator('#operator-notifications')).to_contain_text('Нужно ваше решение · 1')
+            expect(page.get_by_role('button',name='Вернуться к решению',exact=True)).to_be_visible()
+            page.get_by_role('button',name='Вернуться к решению',exact=True).click()
+            expect(page.locator('#operator-notifications')).to_contain_text('Нужно ваше решение · 2')
             page.locator('#databases-operator-request .export-candidate select').select_option('new_version')
             page.get_by_role('button',name='Применить выбранные действия',exact=True).evaluate('(button)=>{button.click();button.click()}')
             expect(page.locator('#operator-notifications')).to_contain_text('Нужно ваше решение · 1')
@@ -81,7 +87,7 @@ def main():
             page.locator('#files-operator-request').get_by_role('button',name='Новая папка версии',exact=True).evaluate('(button)=>{button.click();button.click()}')
             expect(page.locator('#operator-notifications')).to_be_hidden()
             assert management.task(files['id'])['conflict_decisions'][key]=='new_version'
-            assert sum(path.endswith('/decision') for path,_ in posts)==1
+            assert sum(path.endswith('/decision') for path,_ in posts)==3
             assert sum(path.endswith('/conflict') for path,_ in posts)==1
             page.close();browser.close()
         assert not errors,errors

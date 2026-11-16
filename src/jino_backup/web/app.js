@@ -109,6 +109,7 @@ const stages = {
   AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
   FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
   ACTION_REQUIRED: "Нужно ваше решение",
+  OPERATOR_DEFERRED: "Отложено по вашему выбору",
   OPERATOR_ACTION_REQUIRED: "Запрошено решение оператора",
   SOURCE_REFRESH: "Обновление изменившегося источника",
   SOURCE_REFRESH_WAIT: "Ожидает повторной загрузки изменившихся файлов",
@@ -220,6 +221,12 @@ function current(server) {
 function saved(server) {
   return server.progress.received_bytes + server.databases.received_bytes;
 }
+function operatorDecisionRequests(servers) {
+  return (servers || []).filter(server=>!server.blocked && !server.deleted && server.status!=='BLOCKED')
+    .flatMap(server=>(server.tasks || []).filter(task=>task.operator_request && !task.first_copy_wait_for
+      && (!server.latest_tasks?.[task.kind] || server.latest_tasks[task.kind].id===task.id)).map(task=>({server,task})));
+}
+
 function fileCopyHistory(server) {
   const latest = server.latest_tasks?.files;
   const numeric = value => Number.isSafeInteger(value) && value >= 0 ? value : null;

@@ -289,7 +289,7 @@ class DashboardManagement:
     def save_server(self, row, payload):
         with self.lock:
             active=[] if row is None else [task for task in self.tasks(row) if task['state'] in ACTIVE]
-            actionable=all(task['state'] in WAITING and task.get('operator_request') and task['id'] not in self.running for task in active)
+            actionable=all(task['state'] in WAITING and (task.get('operator_request') or task.get('operator_deferred')) and task['id'] not in self.running for task in active)
             if row is not None and ((self.busy(row) and not actionable and not set(payload)<= {'skip_unsupported_names','ftp_connections'}) or self._legacy_busy(row)):
                 raise BackupError("SERVER_BUSY")
             if (
@@ -467,6 +467,11 @@ class DashboardManagement:
 
     def _request_operator(self,task_id,reason=None):
         task=self.task(task_id)
+        server=self.catalog.get(task['row'],include_deleted=True)
+        if server['blocked'] or server['deleted']:return False
+        if task.get('operator_deferred'):
+            current=reason or task.get('error_code') or (task.get('result') or {}).get('error_code')
+            if not current or current==task['operator_deferred']['request']['code']:return False
         if task['state'] in {'PAUSED','PAUSING','STOPPED','STOPPING'}:return False
         if task['state']=='WAITING_OPERATOR' and task.get('operator_request') and reason is None:return False
         conflicts=(task.get('result') or {}).get('file_conflicts_count',0)>0
@@ -501,8 +506,34 @@ class DashboardManagement:
             task=self.task(task_id)
             request=task.get('operator_request') or {}
             action=payload.get('action')
-            if payload.get('request_id')!=request.get('id') or action not in request.get('actions',[]):
+            if action=='reopen':
+                deferred=task.get('operator_deferred') or {}
+                previous=deferred.get('request') or {}
+                if payload.get('request_id')!=previous.get('id') or not previous:raise BackupError('REQUEST_INVALID')
+                restored={**previous,'id':uuid.uuid4().hex,'created_at':timestamp(),'blocking':task_id not in self.running}
+                restored.pop('inspection_pending',None)
+                if previous['code']=='REMOTE_DESTINATION_EXISTS':
+                    restored['actions']=['inspect_exports','retry']
+                    if self.inventory.export_candidates(task['row'],task['revision'],task_id):restored['actions'].insert(0,'apply_exports')
+                server=self.catalog.get(task['row'],include_deleted=True)
+                if server['binding_revision']!=task['revision']:
+                    restored.update(code='SERVER_CONFIG_CHANGED',actions=['start_new_scope'])
+                changes={'operator_request':restored,'operator_deferred':None}
+                if task_id not in self.running and task['state'] not in {'PAUSED','PAUSING','STOPPED','STOPPING'}:
+                    changes.update(state='WAITING_OPERATOR',stage='ACTION_REQUIRED')
+                self._update(task_id,**changes)
+                return {'ok':True}
+            if not request or payload.get('request_id')!=request.get('id') or (action!='skip' and action not in request.get('actions',[])):
                 raise BackupError('REQUEST_INVALID')
+            if action=='skip':
+                changes={'operator_request':None,'operator_deferred':{'request':request,'at':timestamp(),
+                         'blocking':task['kind']=='databases' or request.get('blocking',True)}}
+                if task_id not in self.running and task['state'] not in {'PAUSED','PAUSING','STOPPED','STOPPING'}:
+                    changes.update(state='WAITING_OPERATOR',stage='OPERATOR_DEFERRED')
+                self._update(task_id,**changes)
+                self.event(task['row'],'OPERATOR_DECISION_SKIPPED',kind=task['kind'],code=request['code'],task_id=task_id)
+                self._schedule()
+                return {'ok':True}
             if action=='inspect_exports':
                 self._update(task_id,export_handling='inspect')
             if action=='resume_panel':self.access_policy.resume()
@@ -523,10 +554,14 @@ class DashboardManagement:
                 for item in selections:
                     candidate=candidates[item['candidate_id']]
                     alias=candidate.get('db_alias') or item.get('db_alias')
-                    if alias not in allowed or alias in aliases or not candidate.get('name','').endswith('.sql'):
+                    if (alias not in allowed or alias in aliases or not isinstance(candidate.get('name'),str)
+                            or not candidate['name'].endswith('.sql') or candidate.get('selectable') is False
+                            or candidate.get('kind','file')!='file' or candidate.get('listing_error')):
                         raise BackupError('REQUEST_INVALID')
                     aliases.add(alias)
                     candidate.update(db_alias=alias,supported=True,database_name=known[alias]['name'])
+                if any(candidates[item['candidate_id']].get('comparison') is None for item in selections):
+                    return self.resolve_request(task_id,{'request_id':request['id'],'action':'inspect_exports'})
                 self.inventory.save_export_candidates(task['row'],task['revision'],task_id,list(candidates.values()))
                 self._update(task_id,export_handling='selected',export_decisions={item['candidate_id']:item['decision'] for item in selections},
                              **({'source_snapshot_verified':False} if any(item['decision']!='keep_local' for item in selections) else {}))
@@ -581,7 +616,7 @@ class DashboardManagement:
                     if action == "pause"
                     else ("STOPPING" if active else "STOPPED"),
                 )
-                if action=='stop':self._update(task_id,operator_request=None)
+                if action=='stop':self._update(task_id,operator_request=None,operator_deferred=None)
             if control:
                 control.request(action)
             self.event(
@@ -612,6 +647,7 @@ class DashboardManagement:
             if task["state"] not in WAITING:
                 continue
             if task.get('operator_request') and task['operator_request'].get('blocking',True):continue
+            if (task.get('operator_deferred') or {}).get('blocking',False):continue
             if task['kind']=='databases' and task.get('schedule_occurrence'):
                 from .work_plans import full_copy
                 has_copy=any(t['kind']=='databases' and t['revision']==task['revision'] and full_copy(t)
@@ -932,6 +968,9 @@ class DashboardManagement:
                     task_id=task_id,
                 )
                 self.running.discard(task_id)
+                if task.get('operator_deferred') and (task['state']=='FINISHED' or task.get('error_code')==task['operator_deferred']['request']['code']):
+                    deferred_request={**task['operator_deferred'],'blocking':True}
+                    self._update(task_id,state='WAITING_OPERATOR',stage='OPERATOR_DEFERRED',operator_deferred=deferred_request)
                 if deferred:
                     replacement=TaskControl(lambda state:self._control_state(task_id,state))
                     if control.paused:replacement.request('pause')
@@ -976,7 +1015,7 @@ class DashboardManagement:
         changing=(task['state']=='FINISHED' and (task.get('result') or {}).get('status')=='PARTIAL'
                   and (task.get('result') or {}).get('source_changed_count',0)>0)
         code='SOURCE_CHANGED' if changing else task.get('error_code')
-        if self.closed or task['kind'] != 'files' or (not changing and (task['state'] not in {'FAILED','INTERRUPTED'} or code not in AUTO_FILE_ERRORS)):
+        if self.closed or task['kind'] != 'files' or (task.get('operator_deferred') or {}).get('blocking') or (not changing and (task['state'] not in {'FAILED','INTERRUPTED'} or code not in AUTO_FILE_ERRORS)):
             return False
         control = self.controls.get(task_id)
         if control and (control.stopped or control.paused): return False
@@ -1079,7 +1118,7 @@ class DashboardManagement:
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
                        "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code') if key in values},
                 )
-            if values.get('stage')=='FILE_CONFLICT' and values.get('error_code')=='FILE_CONFLICT_PENDING' and not task.get('operator_request'):
+            if values.get('stage')=='FILE_CONFLICT' and values.get('error_code')=='FILE_CONFLICT_PENDING' and not task.get('operator_request') and not task.get('operator_deferred'):
                 self._update(task_id,operator_request={'id':uuid.uuid4().hex,'code':'FILE_CONFLICT_PENDING',
                     'created_at':timestamp(),'actions':[],'blocking':False})
             if phase_changed:self._schedule()

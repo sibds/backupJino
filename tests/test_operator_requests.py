@@ -89,7 +89,7 @@ def test_existing_sql_assignment_requires_known_alias_in_current_scope(managemen
     task=management.start(1,'databases',{})
     management.inventory.discover(1,1,management.catalog.get(1)['account_ref'],['private_db'])
     alias=management.inventory.list(1,1)[0]['db_alias']
-    candidate={'id':'c'*64,'name':'unmapped.sql','path':'private-token','supported':False,'db_alias':None,'size_bytes':100}
+    candidate={'id':'c'*64,'name':'unmapped.sql','path':'private-token','supported':False,'db_alias':None,'size_bytes':100,'comparison':'untracked'}
     management.inventory.save_export_candidates(1,1,task['id'],[candidate])
     management._update(task['id'],state='FAILED',result={'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':1})
     management._request_operator(task['id'])
@@ -124,3 +124,27 @@ def test_manual_pause_of_a_request_survives_restart(management):
     restarted=DashboardManagement(management.data,runner=lambda *args:pytest.fail('Manual pause ignored'),access_policy=management.access_policy)
     try:assert restarted.task(task['id'])['state']=='PAUSED'
     finally:restarted.close()
+
+
+def test_skip_defers_question_without_deleting_parts_or_restarting_it(management):
+    management._schedule=lambda:None
+    task=management.start(1,'databases',{})
+    management._update(task['id'],state='FAILED',error_code='REMOTE_DESTINATION_EXISTS',progress={'received_bytes':123})
+    management._request_operator(task['id']);request=management.task(task['id'])['operator_request']
+    management.resolve_request(task['id'],{'request_id':request['id'],'action':'skip'})
+    deferred=management.task(task['id'])
+    with pytest.raises(BackupError):management.resolve_request(task['id'],{'request_id':request['id'],'action':'skip'})
+    assert not deferred.get('operator_request') and deferred['operator_deferred']['request']['id']==request['id']
+    assert deferred['progress']['received_bytes']==123 and len(management.tasks())==1
+    management._request_operator(task['id'])
+    assert not management.task(task['id']).get('operator_request')
+    management.resolve_request(task['id'],{'request_id':request['id'],'action':'reopen'})
+    assert management.task(task['id'])['operator_request']['id']!=request['id']
+
+
+def test_blocked_server_does_not_get_new_operator_requests(management):
+    management._schedule=lambda:None
+    task=management.start(1,'databases',{})
+    management._update(task['id'],state='FAILED',error_code='AUTH_FAILED')
+    management.catalog.set_flag(1,'blocked',True)
+    assert not management._request_operator(task['id'])

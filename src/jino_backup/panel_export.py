@@ -38,7 +38,7 @@ class PanelExportJob:
     def __init__(self, state_dir, destination, account_ref, idempotency_key,
                  snapshot_date, key, panel_factory, *, timeout_seconds=300,
                  max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None,
-                 resume_job_id=None,existing_exports=None,defer_export_conflicts=False):
+                 resume_job_id=None,existing_exports=None,defer_export_conflicts=False,inventory_callback=None,collision_callback=None):
         try:
             if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
                 raise ValueError
@@ -69,6 +69,8 @@ class PanelExportJob:
         if existing_exports is not None and cleanup_remote:raise BackupError('REQUEST_INVALID')
         self.existing_exports=existing_exports
         self.defer_export_conflicts=defer_export_conflicts
+        self.inventory_callback=inventory_callback
+        self.collision_callback=collision_callback
         self.private_path = self.root / (self.job_id + '.enc')
         self.report_path = self.root / (self.job_id + '.json')
         self.event_path = self.root / (self.job_id + '.events.jsonl')
@@ -278,7 +280,9 @@ class PanelExportJob:
                             if not self.defer_export_conflicts or error.code!='REMOTE_DESTINATION_EXISTS':raise
                             pending.append(alias)
                     if pending:
-                        result=self._public('NEEDS_ACTION',error_code='REMOTE_DESTINATION_EXISTS',pending_databases_count=len(pending))
+                        count=self.collision_callback(panel,scope,self.state['databases']) if self.collision_callback else 0
+                        result=self._public('NEEDS_ACTION',error_code='REMOTE_DESTINATION_EXISTS',pending_databases_count=len(pending),
+                            candidates_count=count,inventory_reconciled=bool(self.collision_callback))
                         write_json(self.report_path,result)
                         return result
                     if skipped:
@@ -289,6 +293,7 @@ class PanelExportJob:
                             or any(x['phase'] not in {'CLEANED','RETAINED'} or not x.get('artifact') for x in self.state['databases'].values())):
                         raise BackupError('DATABASE_SCOPE_INCOMPLETE')
                 self.state['phase']='DB_ONLY'
+                if self.inventory_callback:self.inventory_callback(self.state['databases'],self.snapshot_date)
                 self._save()
                 result = self._public('DB_ONLY',cleanup_verified=self.cleanup_remote,transport=scope['transport'])
                 write_json(local_path(self.output,'manifest.json'),{
@@ -438,6 +443,7 @@ class PanelExportJob:
                                     previous['relative_path']='history/'+baseline['sha256']+'.sql'
                     replace_with_retry(partial,target)
                     entry['artifact']=artifact
+                    entry['verified_at']=datetime.now(timezone.utc).isoformat()
                     entry.pop('pending_artifact',None)
                     entry['phase']='DOWNLOADED'
                     self._save()

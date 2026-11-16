@@ -19,6 +19,8 @@
   let databaseVisible = [];
   const labels = {
     ACTION_REQUIRED: "Нужно ваше решение",
+    OPERATOR_DEFERRED: "Отложено по вашему выбору",
+    OPERATOR_DECISION_SKIPPED: "Разбор отложен оператором",
     OPERATOR_ACTION_REQUIRED: "Запрошено решение оператора",
     AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
     FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
@@ -142,7 +144,7 @@
   function renderOperatorNotifications() {
     const target=$('operator-notifications');
     if (!target) return;
-    const requests=(data?.servers || []).flatMap(server=>(server.tasks || []).filter(task=>task.operator_request && !task.first_copy_wait_for).map(task=>({server,task})));
+    const requests=operatorDecisionRequests(data?.servers);
     const signature=JSON.stringify(requests.map(({server,task})=>[server.row,server.name,task.id,task.operator_request.id]));
     if (signature===notificationSignature) return;
     const expanded=target.querySelector('details')?.open;
@@ -160,7 +162,7 @@
         if (location.hash===link.hash) setTab(task.kind);
         else {requestedTab=task.kind;location.hash=link.hash;}
       });
-      const reason=task.operator_request.inspection_pending ? 'Получаем список SQL для выбора' : task.error_message || (task.operator_request.code==='FILE_CONFLICT_PENDING'?'Выберите вариант файла':task.operator_request.code);
+      const reason=task.operator_request.inspection_pending ? 'Сверяем перечень файлов и папок' : task.error_message || (task.operator_request.code==='FILE_CONFLICT_PENDING'?'Выберите вариант файла':task.operator_request.code);
       item.append(link,node('span','secondary-text',reason));(index++<3?list:remaining).append(item);
     }
     content.append(list);
@@ -172,6 +174,17 @@
   }
 
   function renderOperatorRequest(fragment,task) {
+    if (detail?.server?.blocked || detail?.server?.deleted) {
+      fragment.append(node('p','helper','Сервер заблокирован. Сохранённая причина: '+(task.error_message || task.operator_request?.code || task.operator_deferred?.request?.code)+'. Решение потребуется после разблокировки.'));
+      return;
+    }
+    if (task.operator_deferred && !task.operator_request) {
+      const section=node('section','operator-request');
+      section.append(node('h4','','Вы отложили этот вопрос'),node('p','helper','Данные сохранены. Этот запрос не появится в общем списке снова, пока вы сами к нему не вернётесь. Остальные задания продолжаются.'));
+      section.append(actionButton('Вернуться к решению',()=>command('/api/tasks/'+task.id+'/decision',{
+        request_id:task.operator_deferred.request.id,action:'reopen'}),pending));
+      fragment.append(section);return;
+    }
     const request=task.operator_request;
     const section=node('section','operator-request');
     section.setAttribute('aria-label','Решение по заданию');
@@ -183,7 +196,7 @@
       SERVER_CONFIG_CHANGED:'Привязка сервера изменилась. Сохранённые части остаются в прежней папке; новое задание требует подтверждения новой привязки.'
     };
     section.append(node('p','',descriptions[request.code] || task.error_message || 'Не удалось выполнить операцию. Проверьте причину в журнале и выберите действие.'));
-    if (request.inspection_pending) section.append(node('p','notice','Чтение списка SQL поставлено в очередь'+(task.next_at?' · не раньше '+new Date(task.next_at).toLocaleString('ru-RU'):'')+'. Новый экспорт не заказывается.'));
+    if (request.inspection_pending) section.append(node('p','notice','Сверка перечня файлов и папок поставлена в очередь'+(task.next_at?' · не раньше '+new Date(task.next_at).toLocaleString('ru-RU'):'')+'. Новый экспорт не заказывается.'));
     const decide=(action,extra={})=>command('/api/tasks/'+task.id+'/decision',{request_id:request.id,action,...extra});
     const candidates=detail?.server?.export_candidates?.[task.id] || [];
     if (request.actions.includes('apply_exports') && candidates.length) {
@@ -196,10 +209,21 @@
       for (const candidate of candidates) {
         const item=node('li','export-candidate');
         const filename=typeof candidate.name==='string'?candidate.name:'Имя файла не получено';
-        item.append(node('strong','event-file',filename),node('p','helper','На Jino: '+bytes(candidate.size_bytes)+' · изменён '+conflictDate(candidate.mtime)));
+        const kind=candidate.kind || 'file';
+        item.append(node('strong','event-file',(kind==='dir'?'Папка: ':kind==='link'?'Ссылка: ':'')+(candidate.relative_path || filename)));
+        if (kind==='missing') item.append(node('p','helper',candidate.comparison==='missing_remote'?'На Jino не найден при текущем чтении.':'Расположение на Jino не проверено полностью.'));
+        else item.append(node('p','helper','На Jino: '+(kind==='file'?bytes(candidate.size_bytes):kind==='dir'?'каталог':'объект без обхода')+' · изменён '+conflictDate(candidate.mtime)));
+        const comparisons={same_metadata:'Метаданные совпадают с внутренним перечнем.',different:'Метаданные отличаются от внутреннего перечня.',
+          untracked:'Во внутреннем перечне выгрузок не учтён.',known_container:'Каталог связан с учтёнными выгрузками.',
+          missing_remote:'Есть во внутреннем перечне, но не найден на Jino.',not_checked:'Сверка неполная: часть перечня не прочитана.'};
+        item.append(node('p','helper',comparisons[candidate.comparison] || 'Перечень ещё не сверен. Обновите сверку перед выбором.'));
+        if (candidate.internal) item.append(node('p','helper','Внутренний перечень: '+(Number.isFinite(candidate.internal.size_bytes)?bytes(candidate.internal.size_bytes):'размер не указан')+' · дата файла '+conflictDate(candidate.internal.mtime)));
+        if (kind==='dir') item.append(node('p','helper','Учтённых вложенных объектов: '+count(candidate.known_children || 0)+' · новых: '+count(candidate.unknown_children || 0)));
+        if (candidate.listing_error) item.append(node('p','notice warning','Не удалось прочитать содержимое: '+candidate.listing_error+'. Остальной перечень доступен.'));
         const local=(detail.server.database_inventory || []).find(db=>db.db_alias===candidate.db_alias && db.validation==='PASS');
         item.append(node('p','helper',local ? 'Локально проверено: '+bytes(local.size_bytes)+' · дата снимка '+(local.snapshot_date || 'не подтверждена')+' · скачано '+dateLabel(local.downloaded_at) : 'Проверенной локальной копии для сравнения нет.'));
-        const assignable=!candidate.db_alias && filename.endsWith('.sql');
+        const selectable=candidate.selectable!==false && kind==='file' && !candidate.listing_error;
+        const assignable=selectable && !candidate.db_alias && filename.endsWith('.sql');
         if (assignable) {
           item.append(node('p','notice warning','Назначение SQL не подтверждено. Укажите БД только если уверены в соответствии файла.'));
           const label=node('label','','Этот SQL относится к БД');const select=node('select','');
@@ -211,7 +235,7 @@
           select.dataset.jobAction='assign-'+candidate.id;
           select.addEventListener('change',()=>assignments.set(candidate.id,select.value));label.append(select);item.append(label);
         }
-        if (candidate.supported || assignable) {
+        if ((candidate.supported && selectable) || assignable) {
           const label=node('label','','Действие с этим SQL');const select=node('select','');
           select.dataset.jobAction='export-'+candidate.id;
           for (const [value,text] of [['','Выберите действие'],['new_version','Скачать в новую папку версии'],['use_remote','Обновить существующую копию'],['keep_local','Оставить локальную, не скачивать']]) {
@@ -219,7 +243,7 @@
           }
           select.value=choices.get(candidate.id) || '';select.disabled=pending;
           select.addEventListener('change',()=>choices.set(candidate.id,select.value));label.append(select);item.append(label);
-        } else item.append(node('p','notice warning','Файл не сопоставлен с известной БД. Автоматическое назначение и перезапись не выполняются.'));
+        } else if (kind==='file') item.append(node('p','helper','Для этого объекта не выбрано скачивание SQL. Автоматическая перезапись не выполняется.'));
         list.append(item);
       }
       section.append(list,actionButton('Применить выбранные действия',()=>{
@@ -230,10 +254,11 @@
       },pending));
     }
     const actions=node('div','job-controls');
-    if (request.actions.includes('inspect_exports')) actions.append(actionButton(candidates.length?'Обновить список SQL':'Показать SQL на Jino',()=>decide('inspect_exports'),pending));
+    if (request.actions.includes('inspect_exports')) actions.append(actionButton(candidates.length?'Обновить сверку':'Сверить файлы и папки',()=>decide('inspect_exports'),pending));
     if (request.actions.includes('retry')) actions.append(actionButton('Повторить после исправления',()=>decide('retry'),pending));
     if (request.actions.includes('resume_panel')) actions.append(actionButton('Доступ восстановлен — повторить',()=>decide('resume_panel'),pending));
     if (request.actions.includes('start_new_scope')) actions.append(actionButton('Подтвердить новую привязку',()=>decide('start_new_scope'),pending));
+    actions.append(actionButton('Пропустить',()=>decide('skip'),pending));
     actions.append(actionButton('Настройки сервера',()=>setTab('settings'),pending));section.append(actions);
     section.append(node('p','helper','Ожидание решения не занимает рабочий поток. Сохранённые копии и части остаются на месте.'));
     fragment.append(section);
@@ -772,7 +797,7 @@
             )
           );
         }
-        if (task.error_message && !task.operator_request)
+        if (task.error_message && !task.operator_request && !task.operator_deferred)
           fragment.append(
             node(
               "p",
@@ -834,8 +859,8 @@
         );
       }
       const requests=document.createDocumentFragment();
-      if (task?.operator_request) renderOperatorRequest(requests,task);
-      if (kind === 'files') renderFileConflicts(requests,task);
+      if (task?.operator_request || task?.operator_deferred) renderOperatorRequest(requests,task);
+      if (kind === 'files' && !server.blocked && !server.deleted && !task?.operator_deferred) renderFileConflicts(requests,task);
       $(kind+'-operator-request').replaceChildren(requests);
       target.replaceChildren(fragment);
     }

@@ -3,6 +3,8 @@ import json
 import sqlite3
 import threading
 import os
+import hashlib
+import posixpath
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
@@ -23,6 +25,7 @@ class DatabaseInventory:
         with self.connection() as db:
             db.execute('CREATE TABLE IF NOT EXISTS databases (row_id INTEGER, revision INTEGER, alias TEXT, payload BLOB, PRIMARY KEY(row_id,revision,alias))')
             db.execute('CREATE TABLE IF NOT EXISTS export_candidates (row_id INTEGER, revision INTEGER, task_id TEXT, payload BLOB, PRIMARY KEY(row_id,revision,task_id))')
+            db.execute('CREATE TABLE IF NOT EXISTS export_inventory (row_id INTEGER, revision INTEGER, path_key TEXT, payload BLOB, PRIMARY KEY(row_id,revision,path_key))')
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -62,6 +65,43 @@ class DatabaseInventory:
             value=db.execute('SELECT payload FROM export_candidates WHERE row_id=? AND revision=? AND task_id=?',
                              (row,revision,task_id)).fetchone()
         return json.loads(self.cipher.decrypt(value[0])) if value else []
+
+    def remember_exports(self,row,revision,snapshot,entries,verified_times=None):
+        if not self.cipher:return
+        records=[]
+        for alias,entry in entries.items():
+            remote=entry.get('remote') or {};path=remote.get('path')
+            if not isinstance(path,str) or not path:continue
+            artifact=entry.get('artifact') or {}
+            stamp=(verified_times or {}).get(alias) or entry.get('verified_at') or ''
+            records.append({'path':path,'kind':'file','name':remote.get('name') or entry['name']+'.sql',
+                'db_alias':alias,'export_directory_date':snapshot,'size_bytes':remote.get('size_bytes'),
+                'mtime':remote.get('mtime'),'local_verified':artifact.get('validation')=='PASS',
+                'local_size_bytes':artifact.get('size_bytes'),'observed_at':stamp})
+            marker='/backups/'+str(snapshot)+'/'
+            if marker in path:
+                parent=posixpath.dirname(path)
+                while marker in parent+'/':
+                    if parent.endswith('/backups/'+str(snapshot)):break
+                    records.append({'path':parent,'kind':'dir','name':posixpath.basename(parent),
+                        'export_directory_date':snapshot,'observed_at':stamp})
+                    parent=posixpath.dirname(parent)
+        with self.connection() as db:
+            for record in records:
+                key=hashlib.sha256(record['path'].encode()).hexdigest()
+                found=db.execute('SELECT payload FROM export_inventory WHERE row_id=? AND revision=? AND path_key=?',(row,revision,key)).fetchone()
+                if found:
+                    previous=json.loads(self.cipher.decrypt(found[0]))
+                    if previous.get('observed_at','')>record.get('observed_at',''):continue
+                db.execute('INSERT OR REPLACE INTO export_inventory VALUES (?,?,?,?)',
+                    (row,revision,key,self.cipher.encrypt(json.dumps(record).encode())))
+
+    def reconcile_exports(self,row,revision,snapshot,candidates):
+        from .export_inventory import reconcile_export_entries
+        with self.connection() as db:
+            records=[json.loads(self.cipher.decrypt(value[0])) for value in db.execute(
+                'SELECT payload FROM export_inventory WHERE row_id=? AND revision=?',(row,revision))]
+        return reconcile_export_entries(candidates,[record for record in records if record.get('export_directory_date')==snapshot])
 
     def discover(self, row, revision, account, names, snapshot=None):
         if not isinstance(names, list) or not all(isinstance(n, str) and n and not any(ord(c)<32 for c in n) for n in names):
@@ -154,5 +194,6 @@ class DatabaseInventory:
                     if artifact.get('validation') == 'PASS':
                         self.verified(task['row'], task['revision'], alias, None if artifact.get('source_snapshot_verified') is False else scope.get('snapshot_date'),
                                       times.get(alias), artifact['size_bytes'],warnings=artifact.get('warnings'))
+                self.remember_exports(task['row'],task['revision'],scope.get('snapshot_date'),entries,times)
             except (OSError, ValueError, InvalidToken, KeyError):
                 continue
