@@ -224,6 +224,10 @@ function saved(server) {
 function operatorDecisionRequests(servers) {
   return (servers || []).filter(server=>!server.blocked && !server.deleted && server.status!=='BLOCKED')
     .flatMap(server=>(server.tasks || []).filter(task=>task.operator_request && !task.first_copy_wait_for
+      && !task.operator_request.inspection_pending
+      && (task.operator_request.actions?.length || task.operator_request.code==='FILE_CONFLICT_PENDING')
+      && (task.operator_request.code!=='FILE_CONFLICT_PENDING' || !Array.isArray(server.conflict_events)
+        || server.conflict_events.some(event=>event.task_id===task.id && event.conflict?.id && !task.conflict_decisions?.[event.conflict.id]))
       && (!server.latest_tasks?.[task.kind] || server.latest_tasks[task.kind].id===task.id)).map(task=>({server,task})));
 }
 

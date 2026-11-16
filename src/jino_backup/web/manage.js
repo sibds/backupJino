@@ -141,10 +141,22 @@
     }
   }
 
-  function renderOperatorNotifications() {
+  let notificationRenderVersion=0;
+  async function renderOperatorNotifications() {
     const target=$('operator-notifications');
     if (!target) return;
-    const requests=operatorDecisionRequests(data?.servers);
+    const version=++notificationRenderVersion;
+    const servers=await Promise.all((data?.servers || []).map(async server=>{
+      if (!operatorDecisionRequests([server]).some(({task})=>task.operator_request.code==='FILE_CONFLICT_PENDING')) return server;
+      try {
+        const response=await fetch('/api/servers/'+server.row,{cache:'no-store'});
+        if (!response.ok) return server;
+        const current=await response.json();
+        return {...server,conflict_events:current.conflict_events};
+      } catch {return server;}
+    }));
+    if (version!==notificationRenderVersion) return;
+    const requests=operatorDecisionRequests(servers);
     const signature=JSON.stringify(requests.map(({server,task})=>[server.row,server.name,task.id,task.operator_request.id]));
     if (signature===notificationSignature) return;
     const expanded=target.querySelector('details')?.open;
@@ -186,6 +198,7 @@
       fragment.append(section);return;
     }
     const request=task.operator_request;
+    if (request?.code==='FILE_CONFLICT_PENDING' && !operatorDecisionRequests([{tasks:[task],conflict_events:detail?.conflict_events}]).length) return;
     const section=node('section','operator-request');
     section.setAttribute('aria-label','Решение по заданию');
     section.append(node('h4','','Что сделать дальше?'));
@@ -900,7 +913,8 @@
     const events=(detail?.conflict_events || []).filter(e=>e.task_id===task.id && e.conflict?.id);
     if (!events.length) return;
     const section=node('section','file-conflicts');
-    section.append(node('h4','','Выберите вариант файла'),node('p','helper','Остальные файлы продолжают скачиваться. Выбранное действие применяется автоматически; до выбора существующая копия сохраняется.'));
+    const unresolved=events.some(event=>!task.conflict_decisions?.[event.conflict.id]);
+    section.append(node('h4','',unresolved?'Выберите вариант файла':'Решения по файлам сохранены'),node('p','helper',unresolved?'Остальные файлы продолжают скачиваться. Выбранное действие применяется автоматически; до выбора существующая копия сохраняется.':'Дополнительных действий не требуется. Сохранённые решения будут применены исполнителем.'));
     for (const event of events) {
       const item=event.conflict;
       if (seen.has(item.id)) continue;
