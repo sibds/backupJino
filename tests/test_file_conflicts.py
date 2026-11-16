@@ -46,6 +46,21 @@ def test_newer_remote_updates_owned_file_and_preserves_old_bytes(tmp_path):
         assert any(p.read_bytes()==b'old' for p in (cp.work/'preserved').rglob('*') if p.is_file())
 
 
+def test_operator_chooses_new_version_folder_before_owned_file_changes(tmp_path):
+    source=MemorySource({'one.txt':(b'old','20261113100000')})
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as cp:
+        cp.resolve_conflicts=True;cp.refresh_changed_sources=True;cp.ask_source_changes=True
+        fetch(cp,source,'one.txt')
+        source.files['one.txt']=(b'new contents','20261116100000')
+        with pytest.raises(BackupError,match='FILE_CONFLICT_PENDING'):fetch(cp,source,'one.txt')
+        assert (cp.root/'files/one.txt').read_bytes()==b'old'
+        cp.conflict_decision=lambda key:'new_version'
+        fetch(cp,source,'one.txt')
+        assert cp.storage_path('one.txt').startswith('versions/')
+        assert cp.file_path('one.txt').read_bytes()==b'new contents'
+        assert (cp.root/'files/one.txt').read_bytes()==b'old'
+
+
 def test_different_same_size_content_requires_decision_without_overwriting(tmp_path):
     source=MemorySource({'one.txt':(b'new', '20261114100000')})
     with DirectoryCheckpoint(tmp_path/'copy', 'scope') as cp:

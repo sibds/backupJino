@@ -8,12 +8,18 @@
   let fetching = false;
   let formFor = null;
   let pending = false;
+  let requestedTab = null;
+  let notificationSignature = '';
+  const exportChoices = new Map();
+  const exportAssignments = new Map();
   let jobFocus = null;
   let serverChoicesSignature = "";
   const databaseSelections = new Map();
   let databaseScope = null;
   let databaseVisible = [];
   const labels = {
+    ACTION_REQUIRED: "Нужно ваше решение",
+    OPERATOR_ACTION_REQUIRED: "Запрошено решение оператора",
     AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
     FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
     SOURCE_REFRESH: "Обновление изменившегося источника",
@@ -55,7 +61,7 @@
     EXPORT_WAIT: "Ожидание SQL-файла",
     DOWNLOAD: "Скачивание SQL",
     SQL_VERIFIED: "Дамп проверен",
-    SQL_WARNING: "Предупреждение: дамп не содержит объектов БД",
+    SQL_WARNING: "Предупреждение проверки SQL",
     DB_ONLY: "Дампы проверены",
     REMOTE_EXPORT_RETAINED: "SQL на хостинге сохранён",
     SNAPSHOT_SELECTED: "Снимок выбран",
@@ -133,7 +139,108 @@
     }
   }
 
+  function renderOperatorNotifications() {
+    const target=$('operator-notifications');
+    if (!target) return;
+    const requests=(data?.servers || []).flatMap(server=>(server.tasks || []).filter(task=>task.operator_request && !task.first_copy_wait_for).map(task=>({server,task})));
+    const signature=JSON.stringify(requests.map(({server,task})=>[server.row,server.name,task.id,task.operator_request.id]));
+    if (signature===notificationSignature) return;
+    const expanded=target.querySelector('details')?.open;
+    notificationSignature=signature;target.hidden=!requests.length;
+    const content=document.createDocumentFragment();
+    content.append(node('h2','','Нужно ваше решение · '+requests.length),node('p','helper','Остальные задания продолжаются. Откройте запрос, сравните варианты и выберите действие.'));
+    const list=node('ul','operator-request-list');
+    const remaining=node('ul','operator-request-list');let index=0;
+    for (const {server,task} of requests) {
+      const item=node('li','');
+      const link=node('a','',server.name+' · '+(task.kind==='databases'?'Базы данных':'Файлы'));
+      link.href='#server/'+server.row;
+      link.addEventListener('click',event=>{
+        event.preventDefault();
+        if (location.hash===link.hash) setTab(task.kind);
+        else {requestedTab=task.kind;location.hash=link.hash;}
+      });
+      const reason=task.operator_request.inspection_pending ? 'Получаем список SQL для выбора' : task.error_message || (task.operator_request.code==='FILE_CONFLICT_PENDING'?'Выберите вариант файла':task.operator_request.code);
+      item.append(link,node('span','secondary-text',reason));(index++<3?list:remaining).append(item);
+    }
+    content.append(list);
+    if (requests.length>3) {
+      const more=node('details','operator-more');more.open=!!expanded;
+      more.append(node('summary','','Ещё запросов: '+(requests.length-3)),remaining);content.append(more);
+    }
+    target.replaceChildren(content);
+  }
+
+  function renderOperatorRequest(fragment,task) {
+    const request=task.operator_request;
+    const section=node('section','operator-request');
+    section.setAttribute('aria-label','Решение по заданию');
+    section.append(node('h4','','Что сделать дальше?'));
+    const descriptions={
+      REMOTE_DESTINATION_EXISTS:'На Jino найдены файлы экспорта, не связанные с текущим заданием. Они не удалены. Можно прочитать их список и выбрать подходящий SQL.',
+      FILE_CONFLICT_PENDING:'У файлов есть разные варианты. Сравните размеры и даты ниже и выберите, какой сохранить.',
+      TLS_CERTIFICATE_INVALID:'Не удалось подтвердить защищённое соединение. Проверьте доступ и сертификат, затем повторите подключение.',
+      SERVER_CONFIG_CHANGED:'Привязка сервера изменилась. Сохранённые части остаются в прежней папке; новое задание требует подтверждения новой привязки.'
+    };
+    section.append(node('p','',descriptions[request.code] || task.error_message || 'Не удалось выполнить операцию. Проверьте причину в журнале и выберите действие.'));
+    if (request.inspection_pending) section.append(node('p','notice','Чтение списка SQL поставлено в очередь'+(task.next_at?' · не раньше '+new Date(task.next_at).toLocaleString('ru-RU'):'')+'. Новый экспорт не заказывается.'));
+    const decide=(action,extra={})=>command('/api/tasks/'+task.id+'/decision',{request_id:request.id,action,...extra});
+    const candidates=detail?.server?.export_candidates?.[task.id] || [];
+    if (request.actions.includes('apply_exports') && candidates.length) {
+      if (!exportChoices.has(request.id)) exportChoices.set(request.id,new Map());
+      if (!exportAssignments.has(request.id)) exportAssignments.set(request.id,new Map());
+      const choices=exportChoices.get(request.id);
+      const assignments=exportAssignments.get(request.id);
+      section.append(node('p','helper','Дата изменения SQL-файла не подтверждает дату исходного снимка. Совпадение размеров не заменяет проверку содержимого.'));
+      const list=node('ul','export-candidate-list');
+      for (const candidate of candidates) {
+        const item=node('li','export-candidate');
+        const filename=typeof candidate.name==='string'?candidate.name:'Имя файла не получено';
+        item.append(node('strong','event-file',filename),node('p','helper','На Jino: '+bytes(candidate.size_bytes)+' · изменён '+conflictDate(candidate.mtime)));
+        const local=(detail.server.database_inventory || []).find(db=>db.db_alias===candidate.db_alias && db.validation==='PASS');
+        item.append(node('p','helper',local ? 'Локально проверено: '+bytes(local.size_bytes)+' · дата снимка '+(local.snapshot_date || 'не подтверждена')+' · скачано '+dateLabel(local.downloaded_at) : 'Проверенной локальной копии для сравнения нет.'));
+        const assignable=!candidate.db_alias && filename.endsWith('.sql');
+        if (assignable) {
+          item.append(node('p','notice warning','Назначение SQL не подтверждено. Укажите БД только если уверены в соответствии файла.'));
+          const label=node('label','','Этот SQL относится к БД');const select=node('select','');
+          const empty=node('option','','Выберите БД');empty.value='';select.append(empty);
+          for (const db of (detail.server.database_inventory || []).filter(db=>!task.db_aliases || task.db_aliases.includes(db.db_alias))) {
+            const option=node('option','',db.name);option.value=db.db_alias;select.append(option);
+          }
+          select.value=assignments.get(candidate.id) || '';select.disabled=pending;
+          select.dataset.jobAction='assign-'+candidate.id;
+          select.addEventListener('change',()=>assignments.set(candidate.id,select.value));label.append(select);item.append(label);
+        }
+        if (candidate.supported || assignable) {
+          const label=node('label','','Действие с этим SQL');const select=node('select','');
+          select.dataset.jobAction='export-'+candidate.id;
+          for (const [value,text] of [['','Выберите действие'],['new_version','Скачать в новую папку версии'],['use_remote','Обновить существующую копию'],['keep_local','Оставить локальную, не скачивать']]) {
+            const option=node('option','',text);option.value=value;select.append(option);
+          }
+          select.value=choices.get(candidate.id) || '';select.disabled=pending;
+          select.addEventListener('change',()=>choices.set(candidate.id,select.value));label.append(select);item.append(label);
+        } else item.append(node('p','notice warning','Файл не сопоставлен с известной БД. Автоматическое назначение и перезапись не выполняются.'));
+        list.append(item);
+      }
+      section.append(list,actionButton('Применить выбранные действия',()=>{
+        const selections=[...choices].filter(([,decision])=>decision).map(([candidate_id,decision])=>({candidate_id,decision,...(assignments.get(candidate_id)?{db_alias:assignments.get(candidate_id)}:{})}));
+        if (!selections.length) return message('Выберите действие хотя бы для одного SQL-файла.',true);
+        if (selections.some(item=>!candidates.find(candidate=>candidate.id===item.candidate_id)?.db_alias && !item.db_alias)) return message('Укажите БД для каждого выбранного SQL-файла.',true);
+        decide('apply_exports',{selections});
+      },pending));
+    }
+    const actions=node('div','job-controls');
+    if (request.actions.includes('inspect_exports')) actions.append(actionButton(candidates.length?'Обновить список SQL':'Показать SQL на Jino',()=>decide('inspect_exports'),pending));
+    if (request.actions.includes('retry')) actions.append(actionButton('Повторить после исправления',()=>decide('retry'),pending));
+    if (request.actions.includes('resume_panel')) actions.append(actionButton('Доступ восстановлен — повторить',()=>decide('resume_panel'),pending));
+    if (request.actions.includes('start_new_scope')) actions.append(actionButton('Подтвердить новую привязку',()=>decide('start_new_scope'),pending));
+    actions.append(actionButton('Настройки сервера',()=>setTab('settings'),pending));section.append(actions);
+    section.append(node('p','helper','Ожидание решения не занимает рабочий поток. Сохранённые копии и части остаются на месте.'));
+    fragment.append(section);
+  }
+
   function renderOverall() {
+    renderOperatorNotifications();
     const overall = data?.overall;
     if (!overall) return;
     text("overall-percent", percent(overall.percent));
@@ -217,7 +324,8 @@
             events: [],
           }
         : null;
-      setTab("overview");
+      setTab(requestedTab || "overview");
+      requestedTab=null;
       renderCard();
       loadDetail();
     }
@@ -422,6 +530,8 @@
           'Повторное скачивание дампа: '+task.db_redownload_count+' из 3. Повреждённая версия остаётся до проверки и замены. Допуск панели сохраняется.'));
       if (kind==='databases' && task?.result?.warnings?.includes('SQL_NO_OBJECTS'))
         fragment.append(node('p','notice warning','Дамп завершён, но не содержит объектов БД. Проверьте, что база действительно пустая. Остальные БД обработаны в обычном порядке.'));
+      if (kind==='databases' && (task?.source_snapshot_verified===false || task?.result?.warnings?.includes('EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED')))
+        fragment.append(node('p','notice warning','Скачивается ранее существовавший SQL. Дата его исходного снимка не подтверждена.'));
       if (kind === 'databases' && task?.inspect_only) fragment.append(node('p','helper','Только чтение списка БД из Jino. SQL не заказывается.'));
       const controls = node("div", "job-controls");
       const active = task && activeStates.includes(task.state);
@@ -631,7 +741,7 @@
             node(
               "p",
               "helper",
-              "Исходный снимок " + dateLabel(task.snapshot_date)
+              "Исходный снимок " + (task.source_snapshot_verified===false ? 'не подтверждён' : dateLabel(task.snapshot_date))
             )
           );
         }
@@ -662,7 +772,7 @@
             )
           );
         }
-        if (task.error_message)
+        if (task.error_message && !task.operator_request)
           fragment.append(
             node(
               "p",
@@ -680,7 +790,7 @@
                 ". Пути и причины — в журнале сервера."
             )
           );
-        if (task.result?.status === "PARTIAL")
+        if (task.result?.status === "PARTIAL" && kind==='files')
           fragment.append(
             node(
               "p",
@@ -697,6 +807,8 @@
                 )
             )
           );
+        if (task.result?.status==='PARTIAL' && kind==='databases')
+          fragment.append(node('p','notice warning','По вашему выбору не скачано SQL: '+count(task.result.skipped_databases_count)+'. Полнота копии БД этим заданием не подтверждена.'));
         if (task.state === "PAUSING" || task.state === "STOPPING")
           fragment.append(
             node(
@@ -721,7 +833,10 @@
           )
         );
       }
-      if (kind === 'files') renderFileConflicts(fragment, task);
+      const requests=document.createDocumentFragment();
+      if (task?.operator_request) renderOperatorRequest(requests,task);
+      if (kind === 'files') renderFileConflicts(requests,task);
+      $(kind+'-operator-request').replaceChildren(requests);
       target.replaceChildren(fragment);
     }
     if (jobFocus) {
@@ -760,7 +875,7 @@
     const events=(detail?.conflict_events || []).filter(e=>e.task_id===task.id && e.conflict?.id);
     if (!events.length) return;
     const section=node('section','file-conflicts');
-    section.append(node('h4','','Конфликты файлов'),node('p','helper','Остальные файлы продолжают скачиваться. Решение применяется при продолжении этого задания; прежние копии сохраняются.'));
+    section.append(node('h4','','Выберите вариант файла'),node('p','helper','Остальные файлы продолжают скачиваться. Выбранное действие применяется автоматически; до выбора существующая копия сохраняется.'));
     for (const event of events) {
       const item=event.conflict;
       if (seen.has(item.id)) continue;
@@ -775,12 +890,14 @@
       }
       card.append(node('p','helper',item.remote_sha256 && item.local_sha256 ? 'SHA-256 различается: содержимое файлов не совпадает.' : 'Содержимое не сравнено: конфликт типов объектов или каталогов.'));
       const decision=task.conflict_decisions?.[item.id];
-      if (decision) card.append(node('p','notice','Решение сохранено: '+({keep_both:'сохранить оба',use_remote:'использовать серверный',keep_local:'пропустить серверный'}[decision])+'. После завершения текущего прохода нажмите «Продолжить».'));
+      if (decision) card.append(node('p','notice','Решение сохранено: '+({keep_both:'сохранить оба',new_version:'новая папка версии',use_remote:'обновить существующую копию',keep_local:'оставить локальную'}[decision])+(['PAUSED','PAUSING','STOPPED','STOPPING'].includes(task.state)?'. Применится при продолжении задания.':'. Применится автоматически.')));
       else {
         const actions=node('div','job-controls');
         const choose=value=>command('/api/tasks/'+task.id+'/conflict',{conflict_id:item.id,decision:value});
-        actions.append(actionButton('Сохранить оба',()=>choose('keep_both'),pending),actionButton('Пропустить серверный',()=>choose('keep_local'),pending));
-        if (item.reason==='LOCAL_CONTENT_DIFFERS') actions.append(actionButton('Использовать серверный',()=>choose('use_remote'),pending));
+        if (item.reason==='LOCAL_CONTENT_DIFFERS' || item.reason==='CASE_COLLISION') actions.append(actionButton('Новая папка версии',()=>choose('new_version'),pending));
+        else actions.append(actionButton('Сохранить оба',()=>choose('keep_both'),pending));
+        if (item.reason==='LOCAL_CONTENT_DIFFERS') actions.append(actionButton('Обновить существующую',()=>choose('use_remote'),pending));
+        actions.append(actionButton('Оставить локальную',()=>choose('keep_local'),pending));
         card.append(actions);
       }
       section.append(card);
@@ -1136,6 +1253,8 @@
       info.append(nameGroup);
       if (item.warnings?.includes('SQL_NO_OBJECTS'))
         info.append(node('span','database-copy-state warning','Дамп без объектов. Проверьте, что БД пустая.'));
+      if (item.warnings?.includes('EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED'))
+        info.append(node('span','database-copy-state warning','Дата исходного снимка не подтверждена.'));
       const size = node('td','database-size', copy.saved && Number.isSafeInteger(item.size_bytes) && item.size_bytes >= 0 ? bytes(item.size_bytes) : copy.saved ? 'Неизвестен' : '—');
       size.dataset.label = 'Размер копии';
       const downloaded = node('td','database-downloaded'); downloaded.dataset.label = 'Скачано';

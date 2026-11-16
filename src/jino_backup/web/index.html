@@ -97,6 +97,7 @@
         </div>
       </aside>
       <main id="main" tabindex="-1">
+        <section id="operator-notifications" class="operator-notifications" aria-label="Требуют вашего решения" hidden></section>
         <header class="page-header">
           <div>
             <h1 id="page-title">Серверы</h1>
@@ -545,6 +546,7 @@
             </div>
           </section>
           <section data-card-panel="files" hidden>
+            <div id="files-operator-request" class="job-area"></div>
             <div class="job-heading">
               <div>
                 <h3>Копирование файлов</h3>
@@ -603,6 +605,7 @@
             </p>
           </section>
           <section data-card-panel="databases" hidden>
+            <div id="databases-operator-request" class="job-area"></div>
             <section class="database-catalog" aria-labelledby="database-catalog-heading">
               <div class="database-catalog-heading"><div>
                 <h3 id="database-catalog-heading">Копии баз данных</h3>

@@ -22,6 +22,7 @@ class DatabaseInventory:
         private_dir(path.parent)
         with self.connection() as db:
             db.execute('CREATE TABLE IF NOT EXISTS databases (row_id INTEGER, revision INTEGER, alias TEXT, payload BLOB, PRIMARY KEY(row_id,revision,alias))')
+            db.execute('CREATE TABLE IF NOT EXISTS export_candidates (row_id INTEGER, revision INTEGER, task_id TEXT, payload BLOB, PRIMARY KEY(row_id,revision,task_id))')
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -50,6 +51,18 @@ class DatabaseInventory:
             item.update(changes)
             db.execute('INSERT OR REPLACE INTO databases VALUES (?,?,?,?)', (row, revision, alias, self.cipher.encrypt(json.dumps(item).encode())))
 
+    def save_export_candidates(self,row,revision,task_id,items):
+        with self.connection() as db:
+            db.execute('INSERT OR REPLACE INTO export_candidates VALUES (?,?,?,?)',
+                       (row,revision,task_id,self.cipher.encrypt(json.dumps(items).encode())))
+
+    def export_candidates(self,row,revision,task_id):
+        if not self.cipher:return []
+        with self.connection() as db:
+            value=db.execute('SELECT payload FROM export_candidates WHERE row_id=? AND revision=? AND task_id=?',
+                             (row,revision,task_id)).fetchone()
+        return json.loads(self.cipher.decrypt(value[0])) if value else []
+
     def discover(self, row, revision, account, names, snapshot=None):
         if not isinstance(names, list) or not all(isinstance(n, str) and n and not any(ord(c)<32 for c in n) for n in names):
             raise BackupError('DATABASE_SCOPE_UNVERIFIED')
@@ -64,7 +77,7 @@ class DatabaseInventory:
         if item and (not item.get('downloaded_at') or downloaded_at >= item['downloaded_at']):
             self._update(row, revision, alias, snapshot_date=snapshot, downloaded_at=downloaded_at,
                          size_bytes=size, validation='PASS',
-                         warnings=['SQL_NO_OBJECTS'] if 'SQL_NO_OBJECTS' in (warnings or []) else [])
+                         warnings=[warning for warning in (warnings or []) if warning in {'SQL_NO_OBJECTS','EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED'}])
 
     def schedule(self, row, revision, payload):
         if self.cipher is None:
@@ -139,7 +152,7 @@ class DatabaseInventory:
                 for alias, entry in entries.items():
                     artifact = entry.get('artifact') or {}
                     if artifact.get('validation') == 'PASS':
-                        self.verified(task['row'], task['revision'], alias, scope.get('snapshot_date'),
+                        self.verified(task['row'], task['revision'], alias, None if artifact.get('source_snapshot_verified') is False else scope.get('snapshot_date'),
                                       times.get(alias), artifact['size_bytes'],warnings=artifact.get('warnings'))
             except (OSError, ValueError, InvalidToken, KeyError):
                 continue

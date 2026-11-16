@@ -38,7 +38,7 @@ class PanelExportJob:
     def __init__(self, state_dir, destination, account_ref, idempotency_key,
                  snapshot_date, key, panel_factory, *, timeout_seconds=300,
                  max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None,
-                 resume_job_id=None):
+                 resume_job_id=None,existing_exports=None,defer_export_conflicts=False):
         try:
             if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
                 raise ValueError
@@ -66,6 +66,9 @@ class PanelExportJob:
         self.timeout_seconds, self.max_bytes = timeout_seconds, max_bytes
         self.notify = notify or (lambda event: None)
         self.cleanup_remote=cleanup_remote
+        if existing_exports is not None and cleanup_remote:raise BackupError('REQUEST_INVALID')
+        self.existing_exports=existing_exports
+        self.defer_export_conflicts=defer_export_conflicts
         self.private_path = self.root / (self.job_id + '.enc')
         self.report_path = self.root / (self.job_id + '.json')
         self.event_path = self.root / (self.job_id + '.events.jsonl')
@@ -120,7 +123,8 @@ class PanelExportJob:
         warnings=sorted({warning for artifact in artifacts for warning in artifact.get('warnings',[])})
         return {'job_id':self.job_id,'account_ref':self.account_ref,'status':status,
                 'test_passed':status=='DB_ONLY','source_snapshot_at':None,
-                'source_snapshot_date':self.snapshot_date,'snapshot_time_precision':'day',
+                'source_snapshot_date':None if any(x.get('source_snapshot_verified') is False for x in artifacts) else self.snapshot_date,
+                'snapshot_time_precision':'unknown' if any(x.get('source_snapshot_verified') is False for x in artifacts) else 'day',
                 'databases_count':len(artifacts),'artifacts':artifacts,
                 **({'warnings':warnings} if warnings else {}),
                 'application_restore_tested':False,'files_included':False,
@@ -135,7 +139,7 @@ class PanelExportJob:
             raise BackupError('DB_INTEGRITY_FAILED')
         warnings=validate_sql(file) or []
         if warnings:
-            artifact['warnings']=warnings
+            artifact['warnings']=sorted(set(artifact.get('warnings',[])+warnings))
         return warnings
 
     def _prepare_redownload(self, entry):
@@ -183,7 +187,9 @@ class PanelExportJob:
                 stack.enter_context(server_work(self.destination, self.server_id, self.server_folder, 'databases'))
             self._load()
             try:
-                if self.state['phase']=='DB_ONLY':
+                changed_selection=any(item.get('decision')!='keep_local' and item['id']!=self.state['databases'].get(alias,{}).get('imported_candidate_id')
+                                      for alias,item in (self.existing_exports or {}).items())
+                if self.state['phase']=='DB_ONLY' and not changed_selection:
                     all_valid=True
                     for entry in self.state['databases'].values():
                         if not self._verify_or_prepare_redownload(entry): all_valid=False
@@ -236,12 +242,49 @@ class PanelExportJob:
                     aliases = {identity('db',self.account_ref,name):name for name in names}
                     if set(self.state['databases']) - set(aliases):
                         raise BackupError('DATABASE_SCOPE_CHANGED')
+                    pending=[]
+                    skipped=[]
                     for alias,name in aliases.items():
                         self.control()
                         entry = self.state['databases'].setdefault(alias,{'name':name,'phase':'NEW'})
+                        selected=(self.existing_exports or {}).get(alias)
+                        if selected and selected.get('decision')=='keep_local':
+                            if entry.get('artifact'):self._verify_local(entry['artifact'])
+                            else:skipped.append(alias)
+                            continue
+                        if selected and entry.get('imported_candidate_id')!=selected['id']:
+                            panel.check_existing_export(scope,selected)
+                            old=entry.pop('artifact',None)
+                            if old:
+                                self._verify_local(old)
+                                entry.setdefault('previous_artifacts',[]).append(old)
+                                if selected['decision']=='use_remote':
+                                    entry['replacement_baseline']={'size':old['size_bytes'],'sha256':old['sha256']}
+                                    entry['replace_existing']=True
+                                    entry['selected_relative_path']=old['relative_path']
+                            entry.update(remote=selected,phase='WAITING',imported_candidate_id=selected['id'],
+                                         imported_existing=True)
+                            self.state['phase']='CREATED'
+                            if selected['decision']=='new_version':
+                                entry['selected_relative_path']='versions/'+selected['id'][:24]+'/databases/'+alias+'.sql'
+                            self._save()
                         if entry.get('phase') in {'CLEANED','RETAINED'}:
                             if self._verify_or_prepare_redownload(entry): continue
-                        self._export_one(panel,scope,alias,entry)
+                        try:
+                            if self.existing_exports is not None and not selected and not entry.get('artifact'):
+                                raise BackupError('REMOTE_DESTINATION_EXISTS')
+                            self._export_one(panel,scope,alias,entry)
+                        except BackupError as error:
+                            if not self.defer_export_conflicts or error.code!='REMOTE_DESTINATION_EXISTS':raise
+                            pending.append(alias)
+                    if pending:
+                        result=self._public('NEEDS_ACTION',error_code='REMOTE_DESTINATION_EXISTS',pending_databases_count=len(pending))
+                        write_json(self.report_path,result)
+                        return result
+                    if skipped:
+                        result=self._public('PARTIAL',skipped_databases_count=len(skipped))
+                        write_json(self.report_path,result)
+                        return result
                     if (len(self.state['databases']) != len(names)
                             or any(x['phase'] not in {'CLEANED','RETAINED'} or not x.get('artifact') for x in self.state['databases'].values())):
                         raise BackupError('DATABASE_SCOPE_INCOMPLETE')
@@ -249,7 +292,7 @@ class PanelExportJob:
                 self._save()
                 result = self._public('DB_ONLY',cleanup_verified=self.cleanup_remote,transport=scope['transport'])
                 write_json(local_path(self.output,'manifest.json'),{
-                    'schema_version':'1.0',**result,'capture_consistency':'PROVIDER_SNAPSHOT',
+                    'schema_version':'1.0',**result,'capture_consistency':'BEST_EFFORT' if result['source_snapshot_date'] is None else 'PROVIDER_SNAPSHOT',
                     'encrypted':False,'warnings':result.get('warnings',[])+['FILES_NOT_INCLUDED','RESTORE_NOT_TESTED']})
                 write_json(self.report_path,result)
                 self._event('DB_ONLY',databases_count=result['databases_count'])
@@ -290,8 +333,10 @@ class PanelExportJob:
             entry['download_attempt']=entry.get('download_attempt',0)+1
             self._save()
         suffix='' if self.cleanup_remote else '-'+str(entry['download_attempt'])
-        partial = local_path(self.output,'databases/' + alias + '.sql.partial'+suffix)
-        target = local_path(self.output,'databases/' + alias + '.sql')
+        relative=entry.get('selected_relative_path','databases/'+alias+'.sql')
+        target=local_path(self.output,relative)
+        private_dir(target.parent)
+        partial=local_path(self.output,relative+'.partial'+suffix)
         try:
             if entry['phase']=='NEW':
                 self.control()
@@ -314,7 +359,9 @@ class PanelExportJob:
                     self._event('EXPORT_RESPONSE_UNKNOWN',db_alias=alias)
             if entry['phase'] in {'SUBMITTING','WAITING','DOWNLOADED'}:
                 self._event('EXPORT_WAIT',db_alias=alias)
-                if remote is not None and not self.cleanup_remote and entry.get('download_attempt',0)>1 and not entry.get('artifact'):
+                if entry.get('imported_existing'):
+                    panel.check_existing_export(scope,remote)
+                if remote is not None and not self.cleanup_remote and entry.get('download_attempt',0)>1 and not entry.get('artifact') and not entry.get('imported_existing'):
                     refreshed=panel.wait_export(scope,entry['name'],self.timeout_seconds)
                     if not refreshed or refreshed.get('path')!=remote.get('path'):
                         raise BackupError('EXPORT_RESULT_UNVERIFIED')
@@ -338,10 +385,12 @@ class PanelExportJob:
                 if not entry.get('artifact'):
                     self.control()
                     self._event('DOWNLOAD',db_alias=alias)
-                    if target.exists() and not entry.get('replace_corrupt'):
+                    replacing=entry.get('replace_corrupt') or entry.get('replace_existing')
+                    if target.exists() and not replacing:
                         raise BackupError('LOCAL_DESTINATION_CONFLICT')
                     reusable=None
                     for candidate in sorted(partial.parent.glob(alias+'.sql.partial-*')):
+                        if entry.get('imported_existing'):break
                         if candidate==partial or candidate.is_symlink() or candidate.stat().st_size!=remote.get('size_bytes'):
                             continue
                         try:
@@ -362,18 +411,31 @@ class PanelExportJob:
                     if not partial.is_file() or not 0 < partial.stat().st_size <= self.max_bytes:
                         raise BackupError('DB_EXPORT_LIMIT_EXCEEDED')
                     warnings=validate_sql(partial) or []
-                    artifact={'db_alias':alias,'relative_path':'databases/'+alias+'.sql',
+                    if entry.get('imported_existing'):panel.check_existing_export(scope,remote)
+                    if entry.get('imported_existing') and partial.stat().st_size!=remote['size_bytes']:raise BackupError('SOURCE_CHANGED')
+                    artifact={'db_alias':alias,'relative_path':relative,
                               'size_bytes':partial.stat().st_size,'sha256':sha256_file(partial),
                               'validation':'PASS'}
                     if warnings:
                         artifact['warnings']=warnings
+                    if entry.get('imported_existing'):
+                        artifact['source_snapshot_verified']=False
+                        artifact['warnings']=artifact.get('warnings',[])+['EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED']
                     entry['pending_artifact']=artifact
                     self._save()  # Recover a crash between final rename and journal commit.
-                    if entry.get('replace_corrupt'):
+                    if replacing:
                         baseline=entry.get('replacement_baseline')
                         if target.exists() and (not baseline or not target.is_file()
                                 or target.stat().st_size!=baseline['size'] or sha256_file(target)!=baseline['sha256']):
                             raise BackupError('LOCAL_DESTINATION_CONFLICT')
+                        if entry.get('replace_existing') and target.exists():
+                            preserved=local_path(self.output,'history/'+baseline['sha256']+'.sql')
+                            private_dir(preserved.parent)
+                            if not preserved.exists():shutil.copy2(target,preserved)
+                            if sha256_file(preserved)!=baseline['sha256']:raise BackupError('LOCAL_FILE_CHANGED')
+                            for previous in entry.get('previous_artifacts',[]):
+                                if previous['sha256']==baseline['sha256'] and previous['relative_path']==relative:
+                                    previous['relative_path']='history/'+baseline['sha256']+'.sql'
                     replace_with_retry(partial,target)
                     entry['artifact']=artifact
                     entry.pop('pending_artifact',None)
@@ -383,10 +445,12 @@ class PanelExportJob:
                     entry.pop('invalid_artifact',None)
                     entry.pop('replacement_baseline',None)
                     entry.pop('replace_corrupt',None)
+                    entry.pop('replace_existing',None)
                     self._save()
                     for warning in artifact.get('warnings',[]):
                         self._event('SQL_WARNING',db_alias=alias,warning_code=warning)
-                    self._event('SQL_VERIFIED',db_alias=alias,size_bytes=artifact['size_bytes'],sha256=artifact['sha256'])
+                    self._event('SQL_VERIFIED',db_alias=alias,size_bytes=artifact['size_bytes'],sha256=artifact['sha256'],
+                                source_snapshot_verified=artifact.get('source_snapshot_verified',True))
                 else:
                     self._verify_local(entry['artifact'])
         except BackupError as error:

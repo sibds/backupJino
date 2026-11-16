@@ -166,6 +166,9 @@ class DashboardManagement:
                 if task['kind'] == 'databases': latest_databases.setdefault(task['row'],task)
             for task in latest_files.values(): self._queue_file_resume(task['id'])
             for task in latest_databases.values(): self._queue_database_redownload(task['id'])
+            for task in [*latest_files.values(),*latest_databases.values()]:
+                if task['revision']==self.catalog.get(task['row'],include_deleted=True)['binding_revision']:
+                    self._request_operator(task['id'])
             self._schedule()
 
     def task(self, task_id):
@@ -285,7 +288,9 @@ class DashboardManagement:
 
     def save_server(self, row, payload):
         with self.lock:
-            if row is not None and (self.busy(row) or self._legacy_busy(row)):
+            active=[] if row is None else [task for task in self.tasks(row) if task['state'] in ACTIVE]
+            actionable=all(task['state'] in WAITING and task.get('operator_request') and task['id'] not in self.running for task in active)
+            if row is not None and ((self.busy(row) and not actionable and not set(payload)<= {'skip_unsupported_names','ftp_connections'}) or self._legacy_busy(row)):
                 raise BackupError("SERVER_BUSY")
             if (
                 row is not None
@@ -294,6 +299,9 @@ class DashboardManagement:
             ):
                 raise BackupError("SERVER_BUSY")
             config = self.catalog.save(row, payload)
+            for task in active:
+                if task.get('operator_request') and task['revision']!=config['binding_revision']:
+                    self._request_operator(task['id'],'SERVER_CONFIG_CHANGED')
             if row is not None and self.data.monitor:
                 self.data.monitor.invalidate(row)
             self.event(config["row"], "SERVER_UPDATED" if row else "SERVER_ADDED")
@@ -439,7 +447,7 @@ class DashboardManagement:
             task = self.task(task_id)
             key, decision = payload.get('conflict_id'), payload.get('decision')
             if (task['kind'] != 'files' or not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key)
-                    or decision not in {'keep_both','use_remote','keep_local'}):
+                    or decision not in {'keep_both','new_version','use_remote','keep_local'}):
                 raise BackupError('REQUEST_INVALID')
             server = self.catalog.get(task['row'])
             if server['blocked'] or server['binding_revision'] != task['revision']:
@@ -451,8 +459,83 @@ class DashboardManagement:
                 raise BackupError('REQUEST_INVALID')
             decisions = dict(task.get('conflict_decisions',{}))
             decisions[key] = decision
-            self._update(task_id,conflict_decisions=decisions)
-            return {'ok':True,'apply_on_resume':True}
+            self._update(task_id,conflict_decisions=decisions,conflict_resume_requested=True)
+            if task_id not in self.running and task['state'] not in {'PAUSED','PAUSING','STOPPED','STOPPING'} and (task.get('operator_request') or task['state']=='FINISHED'):
+                self._update(task_id,conflict_resume_requested=False)
+                self.action(task_id,'resume')
+            return {'ok':True,'apply_on_resume':False}
+
+    def _request_operator(self,task_id,reason=None):
+        task=self.task(task_id)
+        if task['state'] in {'PAUSED','PAUSING','STOPPED','STOPPING'}:return False
+        if task['state']=='WAITING_OPERATOR' and task.get('operator_request') and reason is None:return False
+        conflicts=(task.get('result') or {}).get('file_conflicts_count',0)>0
+        partial=task['state']=='FINISHED' and (task.get('result') or {}).get('status')=='PARTIAL'
+        if partial and not conflicts and task['kind']=='files':
+            with self.catalog.connection() as db:
+                pending=db.execute("SELECT json_extract(payload,'$.conflict.id') FROM events WHERE row_id=? AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.stage')='FILE_CONFLICT' AND json_extract(payload,'$.error_code')='FILE_CONFLICT_PENDING'",
+                                   (task['row'],task_id)).fetchall()
+            conflicts=any(key and key not in task.get('conflict_decisions',{}) for (key,) in pending)
+        needs_action=(task.get('result') or {}).get('status')=='NEEDS_ACTION'
+        if task['state']!='FAILED' and not (partial and conflicts) and not needs_action and reason is None:return False
+        control=self.controls.get(task_id)
+        if control and control.stopped:return False
+        if control and control.paused:
+            self._update(task_id,state='PAUSED')
+            return False
+        code=reason or ('FILE_CONFLICT_PENDING' if partial and conflicts else task.get('error_code') or (task.get('result') or {}).get('error_code') or 'INTERNAL_ERROR')
+        actions=['retry']
+        if task['revision']!=self.catalog.get(task['row'],include_deleted=True)['binding_revision']:actions=['start_new_scope']
+        if code=='REMOTE_DESTINATION_EXISTS':actions=['inspect_exports','retry']
+        if task['kind']=='databases' and code=='SOURCE_CHANGED':actions=['inspect_exports','retry']
+        if (task.get('result') or {}).get('candidates_count'):actions=['apply_exports','inspect_exports','retry']
+        if code in {'CAPTCHA_REQUIRED','MFA_REQUIRED','PANEL_AUTH_PAUSED'}:actions=['resume_panel']
+        if task['revision']!=self.catalog.get(task['row'],include_deleted=True)['binding_revision']:actions=['start_new_scope']
+        request={'id':uuid.uuid4().hex,'code':code,'created_at':timestamp(),'actions':actions}
+        self._update(task_id,state='WAITING_OPERATOR',stage='ACTION_REQUIRED',operator_request=request,error_code=code)
+        self.event(task['row'],'OPERATOR_ACTION_REQUIRED',kind=task['kind'],code=code,task_id=task_id)
+        return True
+
+    def resolve_request(self,task_id,payload):
+        with self.lock:
+            task=self.task(task_id)
+            request=task.get('operator_request') or {}
+            action=payload.get('action')
+            if payload.get('request_id')!=request.get('id') or action not in request.get('actions',[]):
+                raise BackupError('REQUEST_INVALID')
+            if action=='inspect_exports':
+                self._update(task_id,export_handling='inspect')
+            if action=='resume_panel':self.access_policy.resume()
+            if action=='start_new_scope':
+                self.action(task_id,'stop')
+                return self.start(task['row'],task['kind'],{'fresh_run':True,**({'inspect_only':True} if task.get('db_aliases') else {})})
+            if action=='apply_exports':
+                selections=payload.get('selections')
+                candidates={item['id']:item for item in self.inventory.export_candidates(task['row'],task['revision'],task_id)}
+                if (not isinstance(selections,list) or not selections or len(selections)>500
+                        or any(not isinstance(item,dict) or item.get('candidate_id') not in candidates
+                            or item.get('decision') not in {'new_version','use_remote','keep_local'} for item in selections)
+                        or len({item['candidate_id'] for item in selections})!=len(selections)):
+                    raise BackupError('REQUEST_INVALID')
+                known={db['db_alias']:db for db in self.inventory.list(task['row'],task['revision'])}
+                allowed=set(known) if task.get('db_aliases') is None else set(task['db_aliases'])
+                aliases=set()
+                for item in selections:
+                    candidate=candidates[item['candidate_id']]
+                    alias=candidate.get('db_alias') or item.get('db_alias')
+                    if alias not in allowed or alias in aliases or not candidate.get('name','').endswith('.sql'):
+                        raise BackupError('REQUEST_INVALID')
+                    aliases.add(alias)
+                    candidate.update(db_alias=alias,supported=True,database_name=known[alias]['name'])
+                self.inventory.save_export_candidates(task['row'],task['revision'],task_id,list(candidates.values()))
+                self._update(task_id,export_handling='selected',export_decisions={item['candidate_id']:item['decision'] for item in selections},
+                             **({'source_snapshot_verified':False} if any(item['decision']!='keep_local' for item in selections) else {}))
+            self.action(task_id,'resume')
+            current=self.task(task_id)
+            if current.get('export_handling')=='inspect' and current['state'] in {'QUEUED','SCHEDULED','WAITING_RATE_LIMIT','RUNNING'}:
+                self._update(task_id,operator_request={'id':uuid.uuid4().hex,'code':'REMOTE_DESTINATION_EXISTS',
+                    'created_at':timestamp(),'actions':[],'blocking':False,'inspection_pending':True})
+            return {'ok':True}
 
     def action(self, task_id, action):
         if action not in {"pause", "resume", "stop"}:
@@ -471,7 +554,8 @@ class DashboardManagement:
                     self._update(task_id,db_redownload_count=0,db_redownload_exhausted=False)
                 partial = task["kind"] == "files" and task["state"] == "FINISHED" and (task.get("result") or {}).get("status") == "PARTIAL"
                 automatic_wait = task['state'] == 'SCHEDULED' and task.get('auto_resume_at')
-                if not partial and not automatic_wait and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
+                requested=task['state']=='WAITING_OPERATOR' and task.get('operator_request')
+                if not partial and not automatic_wait and not requested and task["state"] not in {"PAUSED", "PAUSING", "STOPPED", "INTERRUPTED", "FAILED"}:
                     return task
                 if task.get('auto_resume_at'):
                     self._update(task_id, scheduled_at=None, auto_resume_at=None)
@@ -485,7 +569,7 @@ class DashboardManagement:
                     progress.update(retry_attempt=0, retry_delay_seconds=0, retry_at=None,
                                     active_files=[], active_transfers=0)
                     self._update(task_id, stage="WAITING", progress=progress)
-                self._update(task_id, state="RUNNING" if active else "QUEUED", error_code=None, result=None)
+                self._update(task_id, state="RUNNING" if active else "QUEUED", error_code=None, result=None,operator_request=None)
             elif task["state"] not in ACTIVE:
                 return task
             else:
@@ -497,6 +581,7 @@ class DashboardManagement:
                     if action == "pause"
                     else ("STOPPING" if active else "STOPPED"),
                 )
+                if action=='stop':self._update(task_id,operator_request=None)
             if control:
                 control.request(action)
             self.event(
@@ -512,6 +597,9 @@ class DashboardManagement:
             self.timer.cancel()
             self.timer = None
         self.work_plans.reconcile_first_copies()
+        for rule in self.work_plans.list():
+            if rule['enabled'] and not rule['stale'] and not rule['blocked'] and rule.get('first_copy_task_id'):
+                self._request_operator(rule['first_copy_task_id'])
         self._schedule_databases()
         self.work_plans.tick()
         all_tasks = self.tasks()
@@ -523,6 +611,7 @@ class DashboardManagement:
         for task in sorted(all_tasks, key=lambda item: item.get("position", 0)):
             if task["state"] not in WAITING:
                 continue
+            if task.get('operator_request') and task['operator_request'].get('blocking',True):continue
             if task['kind']=='databases' and task.get('schedule_occurrence'):
                 from .work_plans import full_copy
                 has_copy=any(t['kind']=='databases' and t['revision']==task['revision'] and full_copy(t)
@@ -547,6 +636,7 @@ class DashboardManagement:
                     continue
                 if server['binding_revision'] != task['revision']:
                     self._update(task['id'], state='FAILED', auto_resume_at=None, error_code='SERVER_CONFIG_CHANGED')
+                    self._request_operator(task['id'])
                     continue
             if task['kind']=='databases':
                 if any(item['kind']=='databases' for item in active):continue
@@ -584,6 +674,7 @@ class DashboardManagement:
                     )
                     if not policy["blocked"]:
                         next_wake.append(policy["next_timestamp"])
+                    else:self._request_operator(task['id'],'PANEL_AUTH_PAUSED')
                     continue
             self.running.add(task["id"])
             active.append(task)
@@ -847,6 +938,12 @@ class DashboardManagement:
                     self.controls[task_id]=replacement
                 self._queue_file_resume(task_id)
                 self._queue_database_redownload(task_id)
+                current=self.task(task_id)
+                if current.get('conflict_resume_requested') and (current.get('result') or {}).get('file_conflicts_count'):
+                    self._update(task_id,conflict_resume_requested=False)
+                    self.action(task_id,'resume')
+                else:
+                    self._request_operator(task_id)
                 self._schedule()
 
     def _queue_database_redownload(self,task_id):
@@ -982,6 +1079,9 @@ class DashboardManagement:
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
                        "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code') if key in values},
                 )
+            if values.get('stage')=='FILE_CONFLICT' and values.get('error_code')=='FILE_CONFLICT_PENDING' and not task.get('operator_request'):
+                self._update(task_id,operator_request={'id':uuid.uuid4().hex,'code':'FILE_CONFLICT_PENDING',
+                    'created_at':timestamp(),'actions':[],'blocking':False})
             if phase_changed:self._schedule()
 
     def close(self):

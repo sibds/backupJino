@@ -71,6 +71,7 @@ class DirectoryCheckpoint:
         self.on_commit = None
         self.resolve_conflicts = False
         self.refresh_changed_sources = False
+        self.ask_source_changes = False
         self.conflict_decision = lambda key: None
 
     def __enter__(self):

@@ -103,18 +103,28 @@ def reconcile(checkpoint, source, remote, entry, deadline, *, peer=None):
         local_at = modified_timestamp(previous['modified']) if owned else None
         newer = peer == remote and remote_at is not None and local_at is not None and remote_at > local_at
         details['remote_newer'] = newer
+        details['owned_local']=owned and peer==remote
+        details['recommendation']='new_version' if newer else 'use_remote' if owned and entry.size>initial.st_size else 'keep_local'
         refresh_owned = checkpoint.refresh_changed_sources and owned and peer == remote
-        if decision not in {'keep_both', 'use_remote', 'keep_local'} and not newer and not refresh_owned:
+        automatic=(newer or refresh_owned) and not checkpoint.ask_source_changes
+        if decision not in {'keep_both', 'new_version', 'use_remote', 'keep_local'} and not automatic:
             raise BackupError('FILE_CONFLICT_PENDING', conflict=details)
         if decision == 'keep_local':
             raise BackupError('FILE_CONFLICT_SKIPPED', conflict=details)
         if peer != remote and decision == 'use_remote':
             # Distinct remote paths cannot replace each other's verified artifacts.
             decision = 'keep_both'
-        if decision == 'keep_both':
+        if decision in {'keep_both','new_version'}:
             if peer == remote:
                 checkpoint.retain_local(checkpoint.storage_path(peer),initial.st_size,local_hash)
-            checkpoint.set_location(remote, key)
+            if decision=='new_version':
+                stamp=datetime.fromtimestamp(remote_at,timezone.utc).strftime('%Y%m%d-%H%M%S') if remote_at is not None else 'undated'
+                stored='versions/'+stamp+'-'+key[:24]+'/'+remote
+                local_path(checkpoint.root,'files/'+stored)
+                with checkpoint.mutex,checkpoint.db:
+                    checkpoint.db.execute('INSERT OR REPLACE INTO locations VALUES (?,?)',(remote,stored))
+            else:
+                checkpoint.set_location(remote, key)
             target = checkpoint.file_path(remote)
             if target.exists() and sha256_file(target) != remote_hash:
                 raise BackupError('LOCAL_FILE_CHANGED')
@@ -141,4 +151,4 @@ def reconcile(checkpoint, source, remote, entry, deadline, *, peer=None):
             raise BackupError('LOCAL_FILE_CHANGED')
         os.replace(temporary, target)
         checkpoint.record(remote, entry, 'done', entry.size, remote_hash)
-        return {'action': 'kept_both' if decision == 'keep_both' else 'updated', 'conflict': details}
+        return {'action':'new_version' if decision=='new_version' else 'kept_both' if decision=='keep_both' else 'updated','conflict':details}

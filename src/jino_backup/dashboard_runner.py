@@ -225,6 +225,7 @@ class OperatorRunner:
                     continue_on_error=True,
                     resolve_conflicts=True,
                     refresh_changed_sources=True,
+                    ask_source_changes=True,
                     conflict_decision=lambda key:self.data.management.task(task['id']).get('conflict_decisions',{}).get(key),
                     conflict_notify=progress,
                     skip_unsupported_names=skip_names,
@@ -287,6 +288,7 @@ class OperatorRunner:
                     state_dir=self.data.state_dir,
                     skip_unsupported_names=skip_names,
                     refresh_changed_sources=True,
+                    ask_source_changes=True,
                     conflict_decision=lambda key:self.data.management.task(task['id']).get('conflict_decisions',{}).get(key),
                     notify=lambda event:progress(log=True,**event),
                 ).run()
@@ -309,12 +311,27 @@ class OperatorRunner:
             if selected is not None and not set(selected) <= names.keys():
                 raise BackupError('DATABASE_SCOPE_UNVERIFIED')
             selected_scope = dict(scope, databases=[name for alias,name in names.items() if selected is None or alias in selected])
+            existing_exports=None
+            if task.get('export_handling')=='inspect':
+                candidates=panel.export_candidates(scope)
+                for candidate in candidates:
+                    name=candidate.get('database_name')
+                    alias=identity('db',server['account_ref'],name) if name else None
+                    candidate['db_alias']=alias
+                    candidate['supported']=bool(alias and (selected is None or alias in selected))
+                inventory.save_export_candidates(server['row'],server['binding_revision'],task['id'],candidates)
+                return {'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':len(candidates)}
+            if task.get('export_handling')=='selected':
+                decisions=task.get('export_decisions',{})
+                existing_exports={candidate['db_alias']:{**candidate,'decision':decisions[candidate['id']]}
+                    for candidate in inventory.export_candidates(server['row'],server['binding_revision'],task['id'])
+                    if candidate['id'] in decisions and candidate.get('supported')}
             if task.get('inspect_only'):
                 return {'status':'INSPECTED', 'snapshot_databases_count':len(names), 'source_snapshot_date':snapshot}
             control.checkpoint()
             progress(expected_count=len(selected_scope["databases"]), verified_count=0)
             try:
-                reused = None if task.get('db_redownload_count') or task.get('db_repair_job_id') else completed_database_copy(
+                reused = None if task.get('db_redownload_count') or task.get('db_repair_job_id') or existing_exports is not None else completed_database_copy(
                     self.data.state_dir,
                     self.data.destination,
                     server["account_ref"],
@@ -357,7 +374,7 @@ class OperatorRunner:
                     received += event["size_bytes"]
                     if inventory:
                         inventory.verified(server['row'], server['binding_revision'], event['db_alias'],
-                                           snapshot, event['time'], event['size_bytes'],
+                                           None if event.get('source_snapshot_verified') is False else snapshot, event['time'], event['size_bytes'],
                                            warnings=sql_warnings.get(event['db_alias']))
                 progress(stage=event["stage"], verified_count=verified, received_bytes=received,
                          **({'warning_code':event['warning_code']} if event.get('warning_code') else {}))
@@ -384,6 +401,8 @@ class OperatorRunner:
                 control=control.checkpoint,
                 selected_aliases=selected,
                 resume_job_id=task.get('db_repair_job_id'),
+                existing_exports=existing_exports,
+                defer_export_conflicts=True,
             ).run()
 
     @staticmethod

@@ -155,7 +155,7 @@ class PanelFileSource:
 class PanelFileJob:
     def __init__(self,destination,server_id,folder_name,batch_id,source_factory,*,
                  notify=None,max_bytes=1024**4,max_files=1000000,timeout_seconds=86400,state_dir=None,
-                 skip_unsupported_names=False,refresh_changed_sources=False,conflict_decision=None):
+                 skip_unsupported_names=False,refresh_changed_sources=False,conflict_decision=None,ask_source_changes=False):
         self.destination=Path(destination).absolute()
         self.server_id,self.folder_name=server_id,folder_name
         self.job_id=identity('download',batch_id,'https-panel')
@@ -166,6 +166,7 @@ class PanelFileJob:
         self.state_dir=Path(state_dir) if state_dir else None
         self.skip_unsupported_names=skip_unsupported_names
         self.refresh_changed_sources=refresh_changed_sources
+        self.ask_source_changes=ask_source_changes
         self.conflict_decision=conflict_decision or (lambda key:None)
 
     def run(self):
@@ -177,6 +178,7 @@ class PanelFileJob:
             output=local_path(server,self.job_id)
             with DirectoryCheckpoint(output,self.scope,self.notify) as progress:
                 progress.refresh_changed_sources=self.refresh_changed_sources
+                progress.ask_source_changes=self.ask_source_changes
                 progress.resolve_conflicts=self.refresh_changed_sources
                 progress.conflict_decision=self.conflict_decision
                 manifest_path=local_path(output,'manifest.json')
@@ -214,6 +216,7 @@ class PanelFileJob:
                 'files_count':manifest['files']['count'],'files_bytes':manifest['files']['bytes'],
                 'file_errors_count':len(manifest['files'].get('errors',[])),
                 'source_changed_count':sum(error.get('error_code')=='SOURCE_CHANGED' for error in manifest['files'].get('errors',[])),
+                'file_conflicts_count':sum(error.get('error_code')=='FILE_CONFLICT_PENDING' for error in manifest['files'].get('errors',[])),
                 'files_skipped_count':len(manifest['files'].get('skipped',[])),
                 'links_count':len(manifest.get('links',{})),'already_downloaded':already,
                 'backup_complete':False,'capture_consistency':'BEST_EFFORT'}

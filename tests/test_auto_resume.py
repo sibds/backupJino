@@ -31,7 +31,7 @@ def test_permanent_failures_do_not_loop(management,code):
     def runner(*args): raise BackupError(code)
     management.runner=runner
     task=management.start(1,'files',{})
-    wait_status(management,task['id'],'FAILED')
+    wait_status(management,task['id'],'WAITING_OPERATOR')
     assert not management.task(task['id']).get('auto_resume_at')
 
 
@@ -130,5 +130,5 @@ def test_changed_binding_is_checked_again_before_automatic_admission(management)
     wait_status(management,task['id'],'SCHEDULED')
     management.catalog.save(1,{'ftp_host':'changed.example.test'})
     management._wake()
-    assert management.task(task['id'])['state']=='FAILED'
-    assert management.task(task['id'])['error_code']=='SERVER_CONFIG_CHANGED'
+    assert management.task(task['id'])['state']=='WAITING_OPERATOR'
+    assert management.task(task['id'])['operator_request']['code']=='SERVER_CONFIG_CHANGED'

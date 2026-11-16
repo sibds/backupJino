@@ -108,6 +108,8 @@ const statuses = {
 const stages = {
   AUTO_RESUME_WAIT: "Ожидает автоматического продолжения",
   FIRST_COPY_WAIT: "Ожидает завершения первой полной копии",
+  ACTION_REQUIRED: "Нужно ваше решение",
+  OPERATOR_ACTION_REQUIRED: "Запрошено решение оператора",
   SOURCE_REFRESH: "Обновление изменившегося источника",
   SOURCE_REFRESH_WAIT: "Ожидает повторной загрузки изменившихся файлов",
   FILE_VERIFY: "Проверка сохранённых файлов",

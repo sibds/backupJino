@@ -56,6 +56,7 @@ def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*
                 or binding.get('snapshot_date')!=scope['snapshot_date'] or state.get('snapshot_ref')!=scope['snapshot_ref']):
             continue
         entries=state.get('databases',{})
+        if any((entry.get('artifact') or {}).get('source_snapshot_verified') is False for entry in entries.values()):continue
         if allow_subset:
             entries = {alias:entry for alias,entry in entries.items() if entry.get('name') in set(scope['databases'])}
             if any(not entry.get('artifact') or entry['artifact'].get('validation')!='PASS' for entry in entries.values()):

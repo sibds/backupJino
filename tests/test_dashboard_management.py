@@ -426,7 +426,7 @@ def test_skip_name_setting_persists_and_applies_to_retry(management, monkeypatch
     config = management.save_server(1, {"skip_unsupported_names": False})
     binding = config["binding_revision"]
     task = management.start(1, "files", {"transport": "ftps"})
-    wait_status(management, task["id"], "FAILED")
+    wait_status(management, task["id"], "WAITING_OPERATOR")
     assert management.task(task["id"])["error_code"] == "REMOTE_PATH_UNSAFE"
     config = management.save_server(1, {"skip_unsupported_names": True})
     assert config["binding_revision"] == binding
@@ -748,7 +748,7 @@ def test_a_captcha_failure_stops_later_panel_jobs_but_ftp_remains_available(mana
 
     management.runner = runner
     first = management.start(1, "databases", {})
-    wait_status(management, first["id"], "FAILED")
+    wait_status(management, first["id"], "WAITING_OPERATOR")
     assert management.access_policy.snapshot()["blocked"]
     resumed = management.action(first["id"], "resume")
     assert resumed["state"] == "WAITING_OPERATOR"

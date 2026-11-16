@@ -703,13 +703,15 @@ class DashboardData:
             db_task = latest.get("databases")
             if db_task:
                 current = db_task["progress"]
+                source_verified=(db_task.get('source_snapshot_verified') is not False
+                    and 'EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED' not in (db_task.get('result') or {}).get('warnings',[]))
                 server["databases"] = {
                     "received_bytes": current.get("received_bytes", 0),
                     "verified_count": current.get("verified_count", 0),
                     "expected_count": current.get("expected_count"),
-                    "snapshot_date": db_task.get("snapshot_date"),
+                    "snapshot_date": db_task.get("snapshot_date") if source_verified else None,
                     "snapshot_stale": bool(
-                        db_task.get("snapshot_date")
+                        source_verified and db_task.get("snapshot_date")
                         and db_task["snapshot_date"] < datetime.now(timezone.utc).date().isoformat()
                     ),
                     "current_file": None,
@@ -825,6 +827,9 @@ class DashboardData:
         if self.management:
             config = self.management.catalog.get(row)
             server['database_inventory'] = self.management.inventory.list(row, config['binding_revision'])
+            server['export_candidates']={task['id']:[{key:value for key,value in candidate.items() if key!='path'}
+                for candidate in self.management.inventory.export_candidates(row,config['binding_revision'],task['id'])]
+                for task in server['tasks'] if task.get('operator_request')}
             server['databases']['verified_count'] = max(server['databases'].get('verified_count', 0), sum(x.get('validation') == 'PASS' for x in server['database_inventory']))
         events = list(self.server_events.get(row, []))
         if self.management:
@@ -1243,7 +1248,7 @@ def make_server(data, *, port=8765):
                 r"/api/servers/(\d+)(?:/(jobs|database-schedules|block|unblock|delete))?", path
             )
             task_route = re.fullmatch(
-                r"/api/tasks/(operator-[a-f0-9]{24})/(pause|resume|stop|move|schedule|priority|conflict)",
+                r"/api/tasks/(operator-[a-f0-9]{24})/(pause|resume|stop|move|schedule|priority|conflict|decision)",
                 path,
             )
             if (
@@ -1269,6 +1274,8 @@ def make_server(data, *, port=8765):
                         result = management.work_plans.action(payload)
                     elif task_route and task_route[2] == 'conflict':
                         result = management.resolve_conflict(task_route[1],payload)
+                    elif task_route and task_route[2]=='decision':
+                        result=management.resolve_request(task_route[1],payload)
                     elif task_route and task_route[2] in {"move", "schedule", "priority"}:
                         result = management.change(task_route[1], task_route[2], payload)
                     elif task_route:

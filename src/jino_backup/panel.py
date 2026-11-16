@@ -451,6 +451,34 @@ class JinoPanelBrowser:
         check_owned_listing(self._export_listing(scope),self.owned_paths)
         return None
 
+    def export_candidates(self,scope):
+        """Read-only candidates; selection does not prove snapshot provenance."""
+        payload=self.file_listing_request.post_data_json
+        variables=payload.get('variables',{})
+        if variables.get('objectId')!=scope['container_id'] or variables.get('serviceName')!='hosting':
+            raise BackupError('PROFILE_UNVERIFIED')
+        self.listing_payload=payload
+        items=[]
+        for item in self._export_listing(scope):
+            if (item.get('type')!='file' or item.get('targetType') is not None or item.get('targetDisplayPath') is not None
+                    or not isinstance(item.get('path'),str) or type(item.get('size')) is not int or item['size']<=0):continue
+            signature=[scope['snapshot_ref'],item['path'],item['size'],item.get('mtime')]
+            name=item.get('name','')
+            match=next((db for db in scope['databases'] if name==db+'.sql'),None)
+            items.append({'id':hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest(),
+                          'path':item['path'],'name':name,'size_bytes':item['size'],'mtime':item.get('mtime'),
+                          'database_name':match,'supported':match is not None})
+        return items
+
+    def check_existing_export(self,scope,remote):
+        matches=[item for item in self._export_listing(scope) if item.get('path')==remote['path']]
+        if len(matches)!=1:raise BackupError('SOURCE_CHANGED')
+        item=matches[0]
+        if (item.get('type')!='file' or item.get('targetType') is not None or item.get('targetDisplayPath') is not None
+                or item.get('size')!=remote['size_bytes'] or item.get('mtime')!=remote.get('mtime')):
+            raise BackupError('SOURCE_CHANGED')
+        if not self._tasks_idle():raise BackupError('PANEL_ACCOUNT_BUSY')
+
     def _tasks_idle(self):
         requests={}
         for op,request in self.requests:
