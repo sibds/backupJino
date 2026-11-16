@@ -30,3 +30,10 @@ test('saved file decisions stop asking while waiting for automatic application',
  server.conflict_events.push({task_id:task.id,conflict:{id:'two'}});
  assert.equal(context.operatorDecisionRequests([server]).length,1);
 });
+
+test('internal cancellation is handled automatically without asking for retry',()=>{
+ for (const code of ['CANCELLED','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT']) {
+  const cancelled={...task,error_code:code,operator_request:{id:'cancelled',code,actions:['retry']}};
+  assert.equal(context.operatorDecisionRequests([{row:1,tasks:[cancelled]}]).length,0);
+ }
+});

@@ -46,6 +46,50 @@ def test_stop_cancels_a_pending_automatic_resume(management):
     assert not management.task(task['id']).get('auto_resume_at')
 
 
+@pytest.mark.parametrize('kind',['files','databases'])
+@pytest.mark.parametrize('action',['stop','pause'])
+def test_internal_cancellation_recovery_never_overrides_operator_control(management,kind,action):
+    management._schedule=lambda:None
+    task=management.start(1,kind,{'scheduled_at':'2099-01-01T00:00:00Z'})
+    management.controls[task['id']].request(action)
+    management._update(task['id'],state='FAILED',error_code='CANCELLED',started_at='2020-01-01T00:00:00+00:00')
+    queue=management._queue_file_resume if kind=='files' else management._queue_database_redownload
+    assert not queue(task['id'])
+    assert management.task(task['id'])['state']=='FAILED'
+
+
+@pytest.mark.parametrize('kind',['files','databases'])
+def test_restart_migrates_old_cancelled_operator_request_to_automatic_resume(management,kind):
+    from jino_backup.dashboard_management import DashboardManagement
+    task=management.start(1,kind,{'scheduled_at':'2099-01-01T00:00:00Z'})
+    management._update(task['id'],state='WAITING_OPERATOR',error_code='CANCELLED',
+        started_at='2020-01-01T00:00:00+00:00',workflow_key='same-workflow',
+        operator_request={'id':'old-request','code':'CANCELLED','actions':['retry']})
+    management.close()
+    restarted=DashboardManagement(management.data,runner=lambda *a:pytest.fail('Started before automatic delay'),access_policy=management.access_policy)
+    try:
+        current=restarted.task(task['id'])
+        assert current['state']=='SCHEDULED'
+        assert not current.get('operator_request')
+        assert current['workflow_key']=='same-workflow'
+        assert len(restarted.tasks())==1
+    finally:restarted.close()
+
+
+@pytest.mark.parametrize('change',['blocked','binding'])
+def test_database_cancellation_retry_rechecks_binding_and_block_before_admission(management,change):
+    schedule=management._schedule;management._schedule=lambda:None
+    task=management.start(1,'databases',{'scheduled_at':'2099-01-01T00:00:00Z'})
+    management._update(task['id'],state='FAILED',error_code='CANCELLED')
+    assert management._queue_database_redownload(task['id'])
+    if change=='blocked':management.catalog.set_flag(1,'blocked',True)
+    else:management.catalog.save(1,{'ftp_host':'changed.example.test'})
+    schedule()
+    current=management.task(task['id'])
+    assert current['state']==('PAUSED' if change=='blocked' else 'WAITING_OPERATOR')
+    if change=='binding':assert current['operator_request']['code']=='SERVER_CONFIG_CHANGED'
+
+
 def test_auto_resume_after_24_hours_keeps_key_start_and_backoff(management):
     from datetime import datetime, timezone, timedelta
     future='2099-01-01T00:00:00Z'

@@ -665,7 +665,7 @@ class DashboardManagement:
                     and r['revision']==task['revision'] and r['kind']==task['kind']),None)
                 task=self._update(task['id'],first_copy_wait_for=None,stage='WAITING',
                     scheduled_at=iso_time(time.time()+(rule['every_hours']*3600 if rule else 10800)))
-            if task.get('auto_resume_at') or task['kind']=='databases' and task.get('db_redownload_count',0)>0:
+            if task.get('auto_resume_at') or task['kind']=='databases' and (task.get('db_redownload_count',0)>0 or task.get('db_timeout_count',0)>0):
                 server = self.catalog.get(task['row'], include_deleted=True)
                 if server['blocked'] or server['deleted']:
                     self._update(task['id'], state='PAUSED', auto_resume_at=None, scheduled_at=None)
@@ -988,7 +988,11 @@ class DashboardManagement:
     def _queue_database_redownload(self,task_id):
         task=self.task(task_id)
         timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','CANCELLED'}
-        if (self.closed or task['kind']!='databases' or task['state']!='FAILED'
+        request=task.get('operator_request') or {}
+        automatic_request=(timed_out and task['state']=='WAITING_OPERATOR'
+            and request.get('code')==task.get('error_code') and 'retry' in request.get('actions',[])
+            and not request.get('inspection_pending'))
+        if (self.closed or task['kind']!='databases' or (task['state']!='FAILED' and not automatic_request)
                 or (not timed_out and task.get('error_code')!='DB_INTEGRITY_FAILED')
                 or (task.get('operator_deferred') or {}).get('blocking')): return False
         control=self.controls.get(task_id)
@@ -1017,7 +1021,10 @@ class DashboardManagement:
         changing=(task['state']=='FINISHED' and (task.get('result') or {}).get('status')=='PARTIAL'
                   and (task.get('result') or {}).get('source_changed_count',0)>0)
         code='SOURCE_CHANGED' if changing else task.get('error_code')
-        if self.closed or task['kind'] != 'files' or (task.get('operator_deferred') or {}).get('blocking') or (not changing and (task['state'] not in {'FAILED','INTERRUPTED'} or code not in AUTO_FILE_ERRORS)):
+        request=task.get('operator_request') or {}
+        automatic_request=(task['state']=='WAITING_OPERATOR' and request.get('code')==code
+            and 'retry' in request.get('actions',[]) and not request.get('inspection_pending'))
+        if self.closed or task['kind'] != 'files' or (task.get('operator_deferred') or {}).get('blocking') or (not changing and ((task['state'] not in {'FAILED','INTERRUPTED'} and not automatic_request) or code not in AUTO_FILE_ERRORS)):
             return False
         control = self.controls.get(task_id)
         if control and (control.stopped or control.paused): return False

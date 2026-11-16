@@ -198,6 +198,10 @@
       fragment.append(section);return;
     }
     const request=task.operator_request;
+    if (['CANCELLED','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT'].includes(request?.code)) {
+      fragment.append(node('p','helper','Передача прервалась. Автоматическое продолжение поставит это же задание в очередь с сохранением скачанных частей. Ваше решение не требуется.'));
+      return;
+    }
     if (request?.code==='FILE_CONFLICT_PENDING' && !operatorDecisionRequests([{tasks:[task],conflict_events:detail?.conflict_events}]).length) return;
     const section=node('section','operator-request');
     section.setAttribute('aria-label','Решение по заданию');
