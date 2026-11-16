@@ -19,7 +19,7 @@ ACTIVE = WAITING | {"RUNNING", "PAUSING", "PAUSED", "STOPPING"}
 TERMINAL = {"FINISHED", "FAILED", "STOPPED", "INTERRUPTED"}
 AUTO_FILE_ERRORS = {"TRANSFER_INTERRUPTED", "CONNECTION_FAILED", "SFTP_CONNECTION_FAILED",
                     "OPERATION_TIMEOUT", "TRANSFER_TIMEOUT", "FILETRANSFER_CONNECTION_FAILED",
-                    "FILETRANSFER_AUTH_EXPIRED", "PANEL_RESPONSE_FAILED", "WORKER_RESTARTED"}
+                    "FILETRANSFER_AUTH_EXPIRED", "PANEL_RESPONSE_FAILED", "WORKER_RESTARTED", "CANCELLED"}
 AUTO_FILE_DELAYS = (300, 900, 1800, 3600)
 
 
@@ -987,7 +987,7 @@ class DashboardManagement:
 
     def _queue_database_redownload(self,task_id):
         task=self.task(task_id)
-        timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT'}
+        timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','CANCELLED'}
         if (self.closed or task['kind']!='databases' or task['state']!='FAILED'
                 or (not timed_out and task.get('error_code')!='DB_INTEGRITY_FAILED')
                 or (task.get('operator_deferred') or {}).get('blocking')): return False
@@ -1044,7 +1044,7 @@ class DashboardManagement:
         self._update(task_id, state='SCHEDULED', stage=stage, scheduled_at=scheduled,
                      next_at=scheduled, auto_resume_at=scheduled, auto_resume_count=attempt,
                      auto_resume_bytes=saved, auto_resume_error=code, first_started_at=first,
-                     last_attempt_result=task.get('result'), result=None, error_code=None, progress=progress,
+                     last_attempt_result=task.get('result'), result=None, error_code=None, operator_request=None, progress=progress,
                      ftp_connections=server['ftp_connections'], skip_unsupported_names=server['skip_unsupported_names'])
         self.controls[task_id] = TaskControl(lambda state:self._control_state(task_id,state))
         self.event(task['row'],stage,kind='files',code=code,task_id=task_id)
