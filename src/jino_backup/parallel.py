@@ -252,6 +252,8 @@ class ParallelCollector:
                         self.download_phase_complete=True
                         self.emit(stage='FILE_VERIFY')
                         verifier.result()
+                        if self.failure:
+                            raise self.failure
                         if self.collisions or self.local_conflicts:
                             self.reconcile_conflicts(credentials, site)
                 finally:

@@ -5,18 +5,19 @@ from jino_backup.errors import BackupError
 
 
 @pytest.mark.parametrize('returned', [False, True])
-def test_failed_file_transfer_returns_to_plan_with_same_key(management, returned, monkeypatch):
+@pytest.mark.parametrize('code',['TRANSFER_INTERRUPTED','CANCELLED'])
+def test_failed_file_transfer_returns_to_plan_with_same_key(management, returned, monkeypatch,code):
     def runner(server, task, control, progress):
         progress(received_bytes=123, stage='RETRY_EXHAUSTED')
-        if returned: return {'status':'FAILED','error_code':'TRANSFER_INTERRUPTED'}
-        raise BackupError('TRANSFER_INTERRUPTED')
+        if returned: return {'status':'FAILED','error_code':code}
+        raise BackupError(code)
     management.runner=runner
     task=management.start(1,'files',{'transport':'ftps'})
     wait_status(management,task['id'],'SCHEDULED')
     queued=management.task(task['id'])
     assert queued['stage']=='AUTO_RESUME_WAIT'
     assert queued['progress']['received_bytes']==123
-    assert queued['auto_resume_count']==1 and queued['auto_resume_error']=='TRANSFER_INTERRUPTED'
+    assert queued['auto_resume_count']==1 and queued['auto_resume_error']==code
     assert queued['scheduled_at'] and len(management.tasks())==1
     management.runner=lambda *a:{'status':'FILES_ONLY'}
     due=management._scheduled_timestamp(queued['scheduled_at'])

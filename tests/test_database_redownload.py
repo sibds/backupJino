@@ -60,7 +60,7 @@ def test_database_integrity_failure_schedules_bounded_same_task_redownload(manag
     assert management.task(task['id'])['db_redownload_exhausted']
 
 
-@pytest.mark.parametrize('code',['EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT'])
+@pytest.mark.parametrize('code',['EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','CANCELLED'])
 def test_database_timeouts_keep_same_task_retrying_without_age_or_attempt_limit(management,code):
     management._schedule=lambda:None
     task=management.start(1,'databases',{})

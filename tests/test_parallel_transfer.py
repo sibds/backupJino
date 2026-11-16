@@ -10,6 +10,22 @@ from jino_backup.dashboard_management import TaskControl
 from test_backup import FixtureSource
 
 
+def test_worker_failure_is_not_masked_by_cancelled_conflict_reconciliation(tmp_path):
+    from jino_backup.parallel import ConnectionBudget, ParallelCollector
+    root=tmp_path/'remote';root.mkdir()
+    collector=ParallelCollector(TaskControl(lambda state:None),lambda **event:None,ConnectionBudget(10),
+        metadata_factory=lambda *args:FixtureSource(root),download_factory=lambda *args:FixtureSource(root))
+    def scan():
+        collector.collisions.append(('synthetic',None,None))
+        raise BackupError('TRANSFER_INTERRUPTED')
+    collector.scan=scan
+    collector.reconcile_conflicts=lambda *args:collector.control.checkpoint()
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        with pytest.raises(BackupError) as caught:
+            collector.collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
+    assert caught.value.code=='TRANSFER_INTERRUPTED'
+
+
 def test_new_parallel_file_has_only_the_two_required_source_checks(tmp_path):
     from jino_backup.parallel import ConnectionBudget, ParallelCollector
     root=tmp_path/'remote';root.mkdir();(root/'one.txt').write_bytes(b'synthetic')
