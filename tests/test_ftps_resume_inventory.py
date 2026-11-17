@@ -14,6 +14,33 @@ def collector(metadata,downloader):
                              metadata_factory=metadata,download_factory=downloader)
 
 
+@pytest.mark.parametrize('legacy',[False,True])
+def test_discovered_unstarted_file_survives_restart_before_scan(tmp_path,monkeypatch,legacy):
+    from jino_backup.resume_inventory import ResumeInventory
+    remote=tmp_path/'remote';remote.mkdir();(remote/'new.bin').write_bytes(b'pending')
+    copy=tmp_path/'copy';source=FixtureSource(remote);received=threading.Event()
+    with DirectoryCheckpoint(copy,'scope') as checkpoint:
+        ResumeInventory(checkpoint,'/',100).listing('',lambda:source.listdir(''))
+        assert checkpoint.db.execute('SELECT count(*) FROM files').fetchone()[0]==0
+        if legacy:
+            with checkpoint.db:
+                for table in ('walk_nodes','walk_queue','walk_indexed'):
+                    checkpoint.db.execute('DELETE FROM '+table)
+    original_scan=ParallelCollector.scan
+    def scan(self):
+        assert received.wait(3),'Known unstarted file waited for scan replay'
+        return original_scan(self)
+    monkeypatch.setattr(ParallelCollector,'scan',scan)
+    def download_source(*args):
+        value=FixtureSource(remote);fetch=value.download
+        def download(path,output,offset):
+            fetch(path,output,offset);received.set()
+        value.download=download;return value
+    with DirectoryCheckpoint(copy,'scope') as checkpoint:
+        result=collector(lambda *args:FixtureSource(remote),download_source).collect({}, {'remote_root':'/'},copy,checkpoint)
+    assert result['count']==1
+
+
 def test_saved_receipt_io_does_not_block_discovery_of_new_files(tmp_path,monkeypatch):
     from jino_backup.resume_inventory import ResumeInventory
     remote=tmp_path/'remote';remote.mkdir()

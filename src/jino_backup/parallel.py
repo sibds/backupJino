@@ -193,6 +193,7 @@ class ParallelCollector:
         self.failure = None
         self.download_phase_complete = False
         self.enqueued_paths = set()
+        self.resumed_inventory_bytes=0
         self.resumed_files = self.cached_directories = 0
         self.items, self.directories, self.errors, self.skipped = [], [], [], []
         self.collisions, self.duplicates, self.local_conflicts = [], [], []
@@ -223,6 +224,10 @@ class ParallelCollector:
                     from .resume_inventory import ResumeInventory
                     self.walk=ResumeInventory(checkpoint,metadata.canonical_root,self.max_files)
                     self.ready.set()
+                    self.resume_discovered()
+                    for _ in self.walk.import_pending_cached():
+                        self.control.checkpoint()
+                        self.resume_discovered()
                     self.resume_pending()
                     self.scan()
                 else:
@@ -347,6 +352,7 @@ class ParallelCollector:
 
     def enqueue(self,path,entry):
         if path in self.enqueued_paths:return
+        self.walk.register(path,entry)
         self.enqueued_paths.add(path)
         while True:
             self.control.checkpoint()
@@ -357,12 +363,24 @@ class ParallelCollector:
 
     def skip_unsafe(self,path,error,kind='file'):
         item=omission(path,error,kind)
+        if self.walk:self.walk.omit(path,error.code)
         with self.mutex:
             if any(old['path']==item['path'] and old.get('reason')==item['reason'] for old in self.skipped):return
             self.incomplete=True
             self.skipped.append(item);self.errors.append(dict(item))
             count=len(self.skipped)
         log_omission(lambda event:self.emit(log=True,**event),item,count)
+
+    def resume_discovered(self):
+        for path,entry in self.walk.pending():
+            self.control.checkpoint()
+            if path in self.enqueued_paths or not self.walk.safe_cached(path):continue
+            if entry.size<0:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+            self.resumed_inventory_bytes+=entry.size
+            if self.resumed_inventory_bytes>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+            self.enqueue(path,entry)
+            self.resumed_files+=1
+            self.emit(stage='RESUMING_FILES')
 
     def resume_pending(self):
         """Old checkpoints are enough to resume bytes before any tree listing."""
@@ -373,6 +391,7 @@ class ParallelCollector:
         pending_bytes=0
         for row in rows:
             self.control.checkpoint()
+            if row['path'] in self.enqueued_paths:continue
             try:path=relative_path(row['path'])
             except BackupError as error:
                 if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
@@ -486,6 +505,7 @@ class ParallelCollector:
                 if len(seen) > self.max_files:
                     raise BackupError("TRANSFER_LIMIT_EXCEEDED")
                 if issue:
+                    self.walk.omit(path,'REMOTE_NAME_UNSUPPORTED')
                     displayed_path = display_remote_path(path)
                     omission = {"path": displayed_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
                     self.skipped.append(omission)
@@ -497,6 +517,7 @@ class ParallelCollector:
                 relative_path(path)
                 special = unsupported_type(entry.kind)
                 if self.skip_types and special:
+                    self.walk.omit(path,'REMOTE_TYPE_UNSUPPORTED')
                     omission = {"path": display_remote_path(path), "kind": "special",
                                 "reason": special, "error_code": "REMOTE_TYPE_UNSUPPORTED"}
                     self.skipped.append(omission)
@@ -648,6 +669,9 @@ class ParallelCollector:
                     if self.scanned.is_set():
                         return
                     continue
+                if not self.walk.claim(path):
+                    self.files_queue.task_done()
+                    continue
                 if source is None:
                     stack.enter_context(self.budget.lease(self.control))
                     source = stack.enter_context(self.download_factory(credentials, site, self.metadata, self.control))
@@ -680,8 +704,10 @@ class ParallelCollector:
                             if changed.code!='SOURCE_CHANGED' or not self.checkpoint.refresh_changed_sources or refresh==2:raise
                             entry=self.refresh_entry(path,entry)
                     # Source was checked by fetch; verify the written artifact separately.
+                    self.walk.transferred(path)
                     self.verify_queue.put_nowait((0, path, entry))
                 except BackupError as error:
+                    self.walk.failed(path,error.code)
                     self.emit(stage="FILE_ERROR", log=True, current_file=path, error_code=error.code, **error.details)
                     if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
                         self.skip_unsafe(path,error);continue

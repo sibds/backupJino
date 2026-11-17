@@ -52,6 +52,41 @@ def source_fixture(tmp_path):
     return FixtureSource(root)
 
 
+def test_partial_manifest_does_not_hash_all_saved_files_before_collector(tmp_path,monkeypatch):
+    from jino_backup.bulk import DownloadBatch,Server,ServerPlan
+    from jino_backup.storage import sha256_file
+    source=source_fixture(tmp_path)
+    server=Server('synthetic',1,{'host':'example.test','username':'test','port':21,'protocol':'ftps','password':'synthetic'})
+    class FirstCollector:
+        def collect(self,credentials,site,snapshot,checkpoint):
+            entry=source.stat('a.txt')
+            checkpoint.fetch(source,'a.txt',entry,checkpoint.file_path('a.txt'),float('inf'))
+            item={'path':'a.txt','size_bytes':entry.size,'sha256':sha256_file(checkpoint.file_path('a.txt'))}
+            return {'count':1,'bytes':entry.size,'items':[item],'errors':[{'error_code':'TRANSFER_INTERRUPTED'}]}
+    batch=DownloadBatch(ServerPlan({},[server]),tmp_path/'copies','same-key','/',collector=FirstCollector())
+    directory=tmp_path/'server';directory.mkdir()
+    assert batch._download_locked(server,directory)['status']=='PARTIAL'
+    class ResumedCollector:
+        def collect(self,*args):raise BackupError('COLLECTOR_STARTED')
+    batch.collector=ResumedCollector()
+    def old_hash(*args):pytest.fail('Partial backup blocked all new transfers on old hashes')
+    monkeypatch.setattr('jino_backup.bulk.sha256_file',old_hash)
+    with pytest.raises(BackupError,match='COLLECTOR_STARTED'):
+        batch._download_locked(server,directory)
+    # Deferring the old hash must not turn a damaged old artifact into a success.
+    monkeypatch.undo()
+    (directory/batch.run_id/'files/a.txt').write_bytes(b'damaged')
+    (source.root/'new.txt').write_bytes(b'new data')
+    from jino_backup.parallel import ParallelCollector,ConnectionBudget
+    from jino_backup.dashboard_management import TaskControl
+    batch.collector=ParallelCollector(TaskControl(lambda state:None),lambda **event:None,
+        ConnectionBudget(10),metadata_factory=lambda *args:FixtureSource(source.root),
+        download_factory=lambda *args:FixtureSource(source.root))
+    result=batch._download_locked(server,directory)
+    assert result['status']=='PARTIAL'
+    assert (directory/batch.run_id/'files/new.txt').read_bytes()==b'new data'
+
+
 def capture(source, target, checkpoint):
     return collect_files(
         source, target, max_bytes=100000, max_files=100, timeout_seconds=10, checkpoint=checkpoint

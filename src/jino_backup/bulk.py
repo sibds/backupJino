@@ -132,11 +132,11 @@ class DownloadBatch:
                     if (manifest['scope'] != scope or manifest['status'] not in {'FILES_ONLY','PARTIAL'}
                             or manifest['job_id'] != self.run_id):
                         raise BackupError('INTEGRITY_FAILED')
-                    for item in manifest['files']['items']:
-                        file = local_path(snapshot, 'files/' + item['path'])
-                        if file.stat().st_size != item['size_bytes'] or sha256_file(file) != item['sha256']:
-                            raise BackupError('LOCAL_FILE_CHANGED')
                     if manifest['status']=='FILES_ONLY':
+                        for item in manifest['files']['items']:
+                            file = local_path(snapshot, 'files/' + item['path'])
+                            if file.stat().st_size != item['size_bytes'] or sha256_file(file) != item['sha256']:
+                                raise BackupError('LOCAL_FILE_CHANGED')
                         progress.validate_inventory(manifest['files']['items'])
                         return {'status':'FILES_ONLY', 'files_count':manifest['files']['count'],
                                 'files_bytes':manifest['files']['bytes'], 'already_downloaded':True}
