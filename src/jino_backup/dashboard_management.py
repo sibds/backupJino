@@ -21,6 +21,7 @@ AUTO_FILE_ERRORS = {"TRANSFER_INTERRUPTED", "CONNECTION_FAILED", "SFTP_CONNECTIO
                     "OPERATION_TIMEOUT", "TRANSFER_TIMEOUT", "FILETRANSFER_CONNECTION_FAILED",
                     "FILETRANSFER_AUTH_EXPIRED", "PANEL_RESPONSE_FAILED", "WORKER_RESTARTED", "CANCELLED"}
 AUTO_FILE_DELAYS = (300, 900, 1800, 3600)
+MAX_FILE_JOBS = 24
 
 
 def timestamp():
@@ -129,7 +130,8 @@ class DashboardManagement:
         self.supervisor_timer = None
         self.closed = False
         self.timer = None
-        self.executor = ThreadPoolExecutor(max_workers=7, thread_name_prefix="backup-operator")
+        self.max_file_jobs=MAX_FILE_JOBS
+        self.executor = ThreadPoolExecutor(max_workers=MAX_FILE_JOBS+1, thread_name_prefix="backup-operator")
         if runner is None:
             from .dashboard_runner import OperatorRunner
 
@@ -299,7 +301,7 @@ class DashboardManagement:
             if isinstance(details.get(key),str):event[key]=details[key][:300]
         conflict = details.get('conflict')
         if stage in {'FILE_CONFLICT','FILE_RECONCILED'} and isinstance(conflict, dict):
-            allowed = {'id','remote_path','local_path','remote_size','local_size','remote_modified',
+            allowed = {'id','rule_id','remote_path','local_path','remote_size','local_size','remote_modified',
                        'local_modified','remote_sha256','local_sha256','same_content','remote_newer',
                        'reason','remote_kind','local_kind'}
             event['conflict'] = {key:value for key,value in conflict.items() if key in allowed
@@ -527,6 +529,16 @@ class DashboardManagement:
                 raise BackupError('REQUEST_INVALID')
             decisions = dict(task.get('conflict_decisions',{}))
             decisions[key] = decision
+            if not isinstance(payload.get('apply_to_session',False),bool):
+                raise BackupError('REQUEST_INVALID')
+            if payload.get('apply_to_session'):
+                conflict = json.loads(found[0])['conflict']
+                rule = conflict.get('rule_id')
+                if (not isinstance(rule,str) or not re.fullmatch('[a-f0-9]{64}',rule)
+                        or conflict.get('remote_path') != conflict.get('local_path')
+                        or conflict.get('reason') != 'LOCAL_CONTENT_DIFFERS'):
+                    raise BackupError('REQUEST_INVALID')
+                decisions[rule] = decision
             self._update(task_id,conflict_decisions=decisions,conflict_resume_requested=True)
             if task_id not in self.running and task['state'] not in {'PAUSED','PAUSING','STOPPED','STOPPING'} and (task.get('operator_request') or task['state']=='FINISHED'):
                 self._update(task_id,conflict_resume_requested=False)
@@ -747,10 +759,9 @@ class DashboardManagement:
                 if any(item['kind']=='databases' for item in active):continue
             else:
                 files=[item for item in active if item['kind']=='files']
-                if len(files)>=6:continue
+                if len(files)>=self.max_file_jobs:continue
                 if self._verifying_only(task):
                     if any(self._verifying_only(item) for item in files):continue
-                elif sum(not self._verifying_only(item) for item in files)>=5:continue
             # ConnectionBudget grants actual leases in the runner. Idle reservations
             # must not prevent other servers from using the free connection slots.
             if any(item["row"] == task["row"] and (

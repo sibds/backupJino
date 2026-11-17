@@ -4,6 +4,8 @@ import queue
 import shutil
 import threading
 import time
+import weakref
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 
@@ -24,26 +26,53 @@ class ConnectionBudget:
         self.condition = threading.Condition()
         self.waiters = 0
         self.verification_slot = threading.Semaphore(1)
+        self.scan_slots=threading.Semaphore(3)
+        self.metadata_limit=min(3,limit)
+        self.metadata_reserve=min(3,max(1,limit//3))
+        self.data_limit=max(1,limit-self.metadata_reserve)
+        self.metadata_used=self.data_used=0
+        self.metadata_waiters=deque()
+        self.metadata_sessions=weakref.WeakSet()
 
     def snapshot(self):
         with self.condition:
             return {"used": self.used, "limit": self.limit}
 
     @contextmanager
-    def lease(self, control):
+    def lease(self, control, role='general'):
         waiting = False
+        ticket=object()
+        started=time.monotonic()
+        if role=='metadata':
+            with self.condition:self.metadata_waiters.append(ticket)
         try:
             while True:
                 control.checkpoint()
                 with self.condition:
-                    if self.used < self.limit:
+                    eligible=(role!='metadata' or self.metadata_used<self.metadata_limit and self.metadata_waiters[0] is ticket)
+                    eligible=eligible and (role!='data' or self.data_used<self.data_limit)
+                    if role!='metadata' and self.metadata_sessions:
+                        eligible=eligible and self.used<self.limit-max(0,self.metadata_reserve-self.metadata_used)
+                    if self.used < self.limit and eligible:
                         self.used += 1
+                        if role=='metadata':
+                            self.metadata_used+=1;self.metadata_waiters.popleft()
+                        if role=='data':self.data_used+=1
                         break
                     if not waiting:
                         self.waiters += 1
                         waiting = True
-                    self.condition.wait(0.1)
+                with self.condition:
+                    reclaim=(role=='metadata' or role=='data' and self.metadata_used>self.metadata_reserve
+                             and self.data_used<self.data_limit)
+                if reclaim:
+                    self.reclaim_metadata(time.monotonic()-started>=1)
+                with self.condition:self.condition.wait(0.05)
         finally:
+            if role=='metadata':
+                with self.condition:
+                    if ticket in self.metadata_waiters:self.metadata_waiters.remove(ticket)
+                    self.condition.notify_all()
             if waiting:
                 with self.condition:
                     self.waiters -= 1
@@ -52,7 +81,22 @@ class ConnectionBudget:
         finally:
             with self.condition:
                 self.used -= 1
+                if role=='metadata':self.metadata_used-=1
+                if role=='data':self.data_used-=1
                 self.condition.notify_all()
+
+    def register_metadata(self,session):
+        with self.condition:self.metadata_sessions.add(session)
+
+    def unregister_metadata(self,session):
+        with self.condition:
+            self.metadata_sessions.discard(session)
+            self.condition.notify_all()
+
+    def reclaim_metadata(self,urgent=False):
+        with self.condition:sessions=sorted(self.metadata_sessions,key=lambda s:s.last_used)
+        for session in sessions:
+            if session.release_idle(0 if urgent else .25):return
 
     def contended(self):
         with self.condition:
@@ -78,14 +122,20 @@ class RunControl:
 
 
 class MetadataSession:
-    def __init__(self, source, site, control, notify):
+    def __init__(self, source, site, control, notify, budget=None):
         self.source, self.site, self.control, self.notify = source, site, control, notify
-        self.mutex = threading.Lock()
+        self.mutex = threading.RLock()
         self.priority = threading.Lock()
         self.waiting = 0
+        self.parent_readers=0
+        self.active_calls=0
         self.connected = False
         self.canonical_root = None
         self.checked_parents = set()
+        self.budget,self.connection_lease=budget,None
+        self.last_used=time.monotonic()
+        self.opened_at=self.last_used
+        if budget:budget.register_metadata(self)
 
     @contextmanager
     def locked(self, low_priority=False):
@@ -116,19 +166,30 @@ class MetadataSession:
 
     def call(self, operation, low_priority=False):
         with self.locked(low_priority):
+            self.active_calls+=1
             try:
                 if not self.connected:
-                    self.source.__enter__()
+                    self.checked_parents.clear()
+                    if self.budget:
+                        self.connection_lease=self.budget.lease(self.control,role='metadata')
+                        self.connection_lease.__enter__()
+                    try:self.source.__enter__()
+                    except BaseException:
+                        self.close();raise
                     canonical = getattr(self.source, "canonical_root", self.site["remote_root"])
                     if self.canonical_root is not None and canonical != self.canonical_root:
                         raise BackupError("DOWNLOAD_SCOPE_CHANGED")
                     self.canonical_root = canonical
                     self.connected = True
+                    self.opened_at=time.monotonic()
                 return operation()
             except BackupError as error:
-                if error.code in TRANSIENT_ERRORS:
+                if error.code in TRANSIENT_ERRORS or not self.connected:
                     self.close()
                 raise
+            finally:
+                self.active_calls-=1
+                self.last_used=time.monotonic()
 
     def open(self):
         return retry_call(lambda: self.call(lambda: None), wait=self.control.wait,
@@ -136,9 +197,24 @@ class MetadataSession:
                           phase="SCANNING")
 
     def close(self):
-        self.source.__exit__()
-        self.connected = False
-        self.checked_parents.clear()
+        with self.mutex:
+            try:self.source.__exit__()
+            finally:
+                self.connected = False
+                self.checked_parents.clear()
+                if self.connection_lease is not None:
+                    lease,self.connection_lease=self.connection_lease,None
+                    lease.__exit__(None,None,None)
+
+    def release_idle(self,age):
+        if not self.mutex.acquire(blocking=False):return False
+        try:
+            now=time.monotonic()
+            with self.priority:validating=self.parent_readers>0
+            if not validating and not self.active_calls and self.connected and now-self.last_used>=age and (age>0 or now-self.opened_at>=2):
+                self.close();return True
+            return False
+        finally:self.mutex.release()
 
     def listdir(self, parent):
         return retry_call(lambda: self.call(lambda: list(self.source.listdir(parent))),
@@ -150,13 +226,17 @@ class MetadataSession:
         return self.call(lambda: self.source.stat(relative), low_priority)
 
     def validate_parents(self,relative,low_priority=False):
-        parts=relative_path(relative).split('/')[:-1]
-        for count in range(1,len(parts)+1):
-            parent='/'.join(parts[:count])
-            if parent in self.checked_parents:continue
-            entry=self.stat(parent,low_priority=low_priority)
-            if entry.kind!='dir':raise BackupError('REMOTE_TYPE_UNSAFE')
-            self.checked_parents.add(parent)
+        with self.priority:self.parent_readers+=1
+        try:
+            parts=relative_path(relative).split('/')[:-1]
+            for count in range(1,len(parts)+1):
+                parent='/'.join(parts[:count])
+                if parent in self.checked_parents:continue
+                entry=self.stat(parent,low_priority=low_priority)
+                if entry.kind!='dir':raise BackupError('REMOTE_TYPE_UNSAFE')
+                self.checked_parents.add(parent)
+        finally:
+            with self.priority:self.parent_readers-=1
 
 
 class ParallelCollector:
@@ -208,7 +288,7 @@ class ParallelCollector:
         self.saved_bytes = sum(size for _, size in self.committed.values())
         self.saved_done = sum(state == 'done' for state, _ in self.committed.values())
         checkpoint.on_commit = self.committed_file
-        metadata = MetadataSession(self.metadata_factory(credentials, site), site, self.control, self.emit)
+        metadata = MetadataSession(self.metadata_factory(credentials, site), site, self.control, self.emit,self.budget)
         self.metadata = metadata
         self.emit(stage='RESUMING_FILES')
         barrier = threading.Barrier(self.connections + 1)
@@ -229,7 +309,9 @@ class ParallelCollector:
                         self.control.checkpoint()
                         self.resume_discovered()
                     self.resume_pending()
-                    self.scan()
+                    while not self.budget.scan_slots.acquire(timeout=.1):self.control.checkpoint()
+                    try:self.scan()
+                    finally:self.budget.scan_slots.release()
                 else:
                     self.download(credentials, site, index)
             except BaseException as error:
@@ -248,27 +330,21 @@ class ParallelCollector:
 
         downloads = []
         try:
-            with self.budget.lease(self.control):
-                try:
-                    with ThreadPoolExecutor(max_workers=self.connections + 1, thread_name_prefix="ftps") as pool:
-                        downloads.extend(pool.submit(run, False, index + 1) for index in range(self.connections - 1))
-                        verifier = pool.submit(run, verifier=True)
-                        scanner = pool.submit(run, True)
-                        scanner.result()
-                        try:
-                            for future in downloads:
-                                future.result()
-                        finally:
-                            self.downloads_done.set()
-                        self.download_phase_complete=True
-                        self.emit(stage='FILE_VERIFY')
-                        verifier.result()
-                        if self.failure:
-                            raise self.failure
-                        if self.collisions or self.local_conflicts:
-                            self.reconcile_conflicts(credentials, site)
-                finally:
-                    metadata.close()
+            try:
+                with ThreadPoolExecutor(max_workers=self.connections + 1, thread_name_prefix="ftps") as pool:
+                    downloads.extend(pool.submit(run, False, index + 1) for index in range(self.connections - 1))
+                    verifier = pool.submit(run, verifier=True)
+                    scanner = pool.submit(run, True)
+                    scanner.result()
+                    try:
+                        for future in downloads:future.result()
+                    finally:self.downloads_done.set()
+                    self.download_phase_complete=True
+                    self.emit(stage='FILE_VERIFY')
+                    verifier.result()
+                    if self.failure:raise self.failure
+                    if self.collisions or self.local_conflicts:self.reconcile_conflicts(credentials, site)
+            finally:metadata.close()
             if self.failure:
                 raise self.failure
             if not self.items and not self.errors:
@@ -292,6 +368,7 @@ class ParallelCollector:
             return result
         finally:
             checkpoint.on_commit = None
+            self.budget.unregister_metadata(metadata)
 
     def committed_file(self, path, state, size):
         with self.mutex:
@@ -577,7 +654,9 @@ class ParallelCollector:
             try:
                 # Local filesystem/signature work belongs to the verifier, not
                 # the source-discovery thread feeding the transfer queue.
-                receipt=self.walk.receipt(path,entry)
+                while not self.budget.verification_slot.acquire(timeout=.1):self.control.checkpoint()
+                try:receipt=self.walk.receipt(path,entry)
+                finally:self.budget.verification_slot.release()
                 if receipt:
                     with self.mutex:
                         self.items.append(receipt)
@@ -585,25 +664,25 @@ class ParallelCollector:
                 self.emit(stage='FILE_VERIFY', log=True)
                 def once():
                     nonlocal item,verified_signature
+                    if check_source:
+                        self.metadata.validate_parents(path,low_priority=True)
+                        if self.metadata.stat(path,low_priority=True)!=entry:
+                            raise BackupError('SOURCE_CHANGED')
                     while not self.budget.verification_slot.acquire(timeout=0.1):
                         self.control.checkpoint()
                     with self.mutex:
                         self.verifying += 1
                     try:
-                        if check_source:
-                            self.metadata.validate_parents(path,low_priority=True)
-                            if self.metadata.stat(path,low_priority=True)!=entry:
-                                raise BackupError('SOURCE_CHANGED')
                         self.emit()
                         verified_signature=self.walk.signature(path)
                         item = self.checkpoint.verify_done(path, entry, self.control,
                                                           require_modified=bool(check_source))
-                        if check_source and self.metadata.stat(path, low_priority=True) != entry:
-                            raise BackupError('SOURCE_CHANGED')
                     finally:
                         with self.mutex:
                             self.verifying -= 1
                         self.budget.verification_slot.release()
+                    if check_source and self.metadata.stat(path, low_priority=True) != entry:
+                        raise BackupError('SOURCE_CHANGED')
                 retry_call(once, wait=self.control.wait,
                            notify=lambda **event: self.emit(verification_retry=True, **event),
                            phase='FILE_VERIFY')
@@ -673,7 +752,7 @@ class ParallelCollector:
                     self.files_queue.task_done()
                     continue
                 if source is None:
-                    stack.enter_context(self.budget.lease(self.control))
+                    stack.enter_context(self.budget.lease(self.control,role='data'))
                     source = stack.enter_context(self.download_factory(credentials, site, self.metadata, self.control))
                 worker = threading.get_ident()
                 with self.mutex:
@@ -732,7 +811,7 @@ class ParallelCollector:
 
     def reconcile_conflicts(self, credentials, site):
         from .file_conflicts import reconcile
-        with self.budget.lease(self.control), self.download_factory(credentials, site, self.metadata, self.control) as source:
+        with self.budget.lease(self.control,role='data'), self.download_factory(credentials, site, self.metadata, self.control) as source:
             for path, entry in self.local_conflicts:
                 self.control.checkpoint()
                 try:

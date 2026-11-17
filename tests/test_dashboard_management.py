@@ -190,6 +190,26 @@ def test_supervision_does_not_restart_a_live_worker(management):
         release.set()
 
 
+def test_idle_file_jobs_do_not_block_other_servers_from_starting(management):
+    rows=[1]
+    for index in range(2,9):
+        rows.append(management.catalog.save(None,{
+            'name':f'Synthetic {index}','login':f'panel-{index}','panel_password':'synthetic',
+            'ftp_host':'ftp.example.test','ftp_login':f'ftp-{index}','ftp_password':'synthetic',
+            'protocol':'ftps','ftp_port':21,'remote_root':'/'})['row'])
+    entered={row:threading.Event() for row in rows};release=threading.Event()
+    def runner(server,task,control,progress):
+        progress(stage='SCANNING',active_transfers=0)
+        entered[task['row']].set()
+        while not release.wait(.02):control.checkpoint()
+        return {'status':'FILES_ONLY'}
+    management.runner=runner
+    try:
+        for row in rows:management.start(row,'files',{})
+        assert entered[rows[-1]].wait(2),'Idle scans occupied all transfer admission slots'
+    finally:release.set()
+
+
 @pytest.mark.parametrize('state,expected', [('PAUSING','PAUSED'), ('STOPPING','STOPPED')])
 def test_completed_worker_supervision_preserves_manual_control(management, state, expected):
     from concurrent.futures import Future
@@ -349,6 +369,7 @@ def test_file_and_db_jobs_share_server_only_with_independent_transport(managemen
 def test_database_has_reserved_capacity_when_ftps_budget_is_reserved(management, connections):
     rows = [1]
     capacity = 5
+    management.max_file_jobs=capacity
     management.save_server(1, {"ftp_connections": connections})
     for index in range(2, capacity + 2):
         rows.append(management.catalog.save(None, {
