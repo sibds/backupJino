@@ -1043,6 +1043,19 @@
       if (event.stage === "FILE_SKIPPED") {
         const reasons = {
           WINDOWS_CHARACTERS: "Символы, недопустимые в Windows",
+          INVALID_NAME_TYPE: "Сервер вернул имя неверного типа",
+          EMPTY_NAME: "Сервер вернул пустое имя",
+          DOT_SEGMENT: "Имя содержит переход к текущему или родительскому каталогу",
+          CONTROL_CHARACTER: "В имени есть управляющие символы",
+          EMBEDDED_SEPARATOR: "В имени есть разделитель пути",
+          OUTSIDE_ALLOWED_ROOT: "Путь ведёт за пределы разрешённого корня; обращение к нему запрещено",
+          SOURCE_NAME_CHANGED: "При повторной проверке сервер вернул другое имя",
+          INVALID_TOKEN: "Сервер вернул некорректный идентификатор пути",
+          PATH_NOT_IN_LISTING: "Путь не подтверждён перечнем файлов",
+          DIRECTORY_ALIAS: "Несколько каталогов указывают на один удалённый объект",
+          UNSAFE_DIRECTORY_TYPE: "Вместо каталога обнаружена ссылка или объект другого типа",
+          UNSAFE_EXPORT_OBJECT: "Объект экспорта оказался ссылкой или объектом другого типа",
+          PATH_CHECK_FAILED: "Путь не прошёл проверку безопасности",
           TRAILING_DOT_OR_SPACE: "Точка или пробел в конце имени",
           WINDOWS_RESERVED_NAME: "Зарезервированное имя Windows",
           INVALID_UTF8_NAME: "Недопустимые байты UTF-8; имя показано escape-последовательностями",
@@ -1059,7 +1072,7 @@
             (event.skipped_kind === "dir"
               ? "Каталог пропущен вместе с содержимым. "
               : event.skipped_kind === "special" ? "Специальный объект пропущен. " : "Файл пропущен. ") +
-              (reasons[event.skip_reason] || "Имя несовместимо с Windows")
+              (reasons[event.skip_reason] || event.skip_reason || "Причина не указана в старой записи журнала")
           )
         );
       }

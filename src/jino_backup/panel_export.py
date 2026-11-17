@@ -93,6 +93,10 @@ class PanelExportJob:
             os.fsync(stream.fileno())
         self.notify(event)
 
+    def _skip_unsafe_sql(self,alias,error):
+        self._event('SQL_SKIPPED',db_alias=alias,warning_code='REMOTE_PATH_UNSAFE',
+                    unsafe_reason=error.details.get('unsafe_reason','PATH_CHECK_FAILED'))
+
     def _load(self):
         scope = {'account_ref':self.account_ref,'snapshot_date':self.snapshot_date,'output':str(self.output)}
         if self.database_engine!='mysql':scope['database_engine']=self.database_engine
@@ -236,7 +240,13 @@ class PanelExportJob:
                         write_json(self.report_path,result)
                         return result
                     self._event('PREFLIGHT_TRANSPORT')
-                    panel.preflight(scope)
+                    try:panel.preflight(scope)
+                    except BackupError as error:
+                        if error.code!='REMOTE_PATH_UNSAFE' or not self.defer_export_conflicts:raise
+                        for name in names:self._skip_unsafe_sql(database_alias(self.account_ref,name,self.database_engine),error)
+                        result=self._public('PARTIAL',skipped_databases_count=len(names))
+                        write_json(self.report_path,result)
+                        return result
                     if hasattr(panel,'restore_job'):
                         panel.restore_job(self.state['databases'])
                     self._event('TRANSPORT_READY')
@@ -262,7 +272,10 @@ class PanelExportJob:
                             else:skipped.append(alias)
                             continue
                         if selected and entry.get('imported_candidate_id')!=selected['id']:
-                            panel.check_existing_export(scope,selected)
+                            try:panel.check_existing_export(scope,selected)
+                            except BackupError as error:
+                                if error.code!='REMOTE_PATH_UNSAFE' or not self.defer_export_conflicts:raise
+                                self._skip_unsafe_sql(alias,error);skipped.append(alias);continue
                             old=entry.pop('artifact',None)
                             if old:
                                 self._verify_local(old)
@@ -284,6 +297,8 @@ class PanelExportJob:
                                 raise BackupError('REMOTE_DESTINATION_EXISTS')
                             self._export_one(panel,scope,alias,entry)
                         except BackupError as error:
+                            if self.defer_export_conflicts and error.code=='REMOTE_PATH_UNSAFE':
+                                self._skip_unsafe_sql(alias,error);skipped.append(alias);continue
                             if not self.defer_export_conflicts or error.code!='REMOTE_DESTINATION_EXISTS':raise
                             pending.append(alias)
                     if pending:

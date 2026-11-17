@@ -80,7 +80,7 @@ class CurlFileSource:
                 if armed and line.startswith(b"257 "):
                     canonical = ftplib.parse257(line.decode("utf-8")).rstrip("/") or "/"
                     if root != "/" and canonical != root and not canonical.startswith(root + "/"):
-                        raise BackupError("REMOTE_PATH_UNSAFE")
+                        raise BackupError("REMOTE_PATH_UNSAFE",unsafe_reason='OUTSIDE_ALLOWED_ROOT',operation='PWD',unsafe_path=relative)
                     validated = True
                     operation = "RETR"
                 return len(line)

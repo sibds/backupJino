@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 
 from .errors import BackupError
 from .transfer import Entry,relative_path
+from .unsafe_paths import display_path
 
 
 class ResumeInventory:
@@ -65,7 +66,7 @@ class ResumeInventory:
     def update_entry(self,path,entry):
         """Replace one stale observation without discarding completed siblings."""
         parent,name=posixpath.split(relative_path(path))
-        if entry.name!=name:raise BackupError('REMOTE_PATH_UNSAFE')
+        if entry.name!=name:raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='SOURCE_NAME_CHANGED',unsafe_path=display_path(path),expected_name=display_path(name),actual_name=display_path(entry.name))
         with self.checkpoint.mutex,self.checkpoint.db:
             db=self.checkpoint.db
             saved=db.execute('SELECT payload,checksum FROM walk_listings WHERE path=?',(parent,)).fetchone()

@@ -15,6 +15,7 @@ from .server_folders import server_work
 from .state import write_json
 from .storage import CHUNK,sha256_file
 from .transfer import Entry,collect_files,relative_path,safe_name,name_compatibility_issue
+from .unsafe_paths import display_path
 
 
 def canonical_account_root(home,requested):
@@ -48,11 +49,13 @@ def latest_database_snapshot(rows,engine):
 
 
 class PanelFileSource:
-    def __init__(self,panel,scope,*,skip_unsupported_names=False):
+    def __init__(self,panel,scope,*,skip_unsupported_names=False,continue_on_error=False):
         if not scope.get('binding_verified'):
             raise BackupError('PROFILE_UNVERIFIED')
         self.panel,self.scope=panel,scope
         self.skip_unsupported_names=skip_unsupported_names
+        self.continue_on_error=continue_on_error
+        self.unsafe_paths={}
         self.paths={'':panel.root_file_token}
         self.directory_tokens={panel.root_file_token:''}
         self.links={}
@@ -75,32 +78,44 @@ class PanelFileSource:
         root=self.scope['canonical_root'].rstrip('/') or '/'
         if (not isinstance(token,str) or not token.startswith('/') or '..' in token.split('/')
                 or root!='/' and token!=root and not token.startswith(root+'/')):
-            raise BackupError('REMOTE_PATH_UNSAFE')
+            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='OUTSIDE_ALLOWED_ROOT' if isinstance(token,str) else 'INVALID_TOKEN')
         return token
 
     def listdir(self,relative):
         relative_path(relative)
+        if relative in self.unsafe_paths:raise self.unsafe_paths[relative]
         if relative not in self.paths:
-            raise BackupError('REMOTE_PATH_UNSAFE')
+            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='PATH_NOT_IN_LISTING',unsafe_path=display_path(relative))
         result=[]
         for item in self.panel._list(self.paths[relative]):
             name=item.get('name')
-            if self.skip_unsupported_names:
-                name_compatibility_issue(name)
-            else:
-                safe_name(name)
+            try:
+                if self.skip_unsupported_names:name_compatibility_issue(name)
+                else:safe_name(name)
+            except BackupError as error:
+                if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                result.append(Entry(name,item.get('type','file'),item.get('size',0),str(item.get('mtime'))))
+                continue
             path=posixpath.join(relative,name)
             if item.get('targetType') is not None or item.get('targetDisplayPath') is not None:
                 self.links[path]={'target_type':item.get('targetType'),'target':item.get('targetDisplayPath')}
                 continue
-            token=self._safe_token(item.get('path'))
+            try:
+                token=self._safe_token(item.get('path'))
+                if item.get('type')=='dir' and token in self.directory_tokens and self.directory_tokens[token]!=path:
+                    raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='DIRECTORY_ALIAS')
+            except BackupError as error:
+                if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                self.unsafe_paths[path]=error
+                result.append(Entry(name,item.get('type','file'),item.get('size',0),str(item.get('mtime'))))
+                continue
             kind=item.get('type')
             if kind not in {'dir','file'}:
                 raise BackupError('REMOTE_TYPE_UNSAFE')
             if kind=='dir':
                 previous=self.directory_tokens.get(token)
                 if previous is not None and previous!=path:
-                    raise BackupError('REMOTE_PATH_UNSAFE')
+                    raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='DIRECTORY_ALIAS',unsafe_path=display_path(path))
                 self.directory_tokens[token]=path
             self.paths[path]=token
             result.append(Entry(name,kind,item.get('size',0),
@@ -108,6 +123,7 @@ class PanelFileSource:
         return result
 
     def stat(self,relative):
+        if relative in self.unsafe_paths:raise self.unsafe_paths[relative]
         parent,name=posixpath.split(relative_path(relative))
         matches=[x for x in self.listdir(parent) if x.name==name]
         if len(matches)!=1:
@@ -116,6 +132,7 @@ class PanelFileSource:
 
     def download(self,relative,outgoing,offset):
         relative_path(relative)
+        if relative in self.unsafe_paths:raise self.unsafe_paths[relative]
         token=self._safe_token(self.paths[relative])
         try:
             incoming=None

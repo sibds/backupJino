@@ -13,6 +13,7 @@ from .errors import BackupError
 from .retry import retry_call, TRANSIENT_ERRORS
 from .state import private_dir
 from .transfer import Entry, name_compatibility_issue, relative_path, source_for, display_remote_path, unsupported_type
+from .unsafe_paths import display_path,omission,log_omission
 
 
 class ConnectionBudget:
@@ -177,6 +178,7 @@ class ParallelCollector:
 
     def collect(self, credentials, site, snapshot, checkpoint):
         self.snapshot, self.checkpoint = snapshot, checkpoint
+        self.walk=None
         private_dir(local_path(snapshot, "files"))
         self.abort, self.ready, self.scanned = threading.Event(), threading.Event(), threading.Event()
         deadline = float('inf') if self.timeout is None else time.monotonic() + self.timeout
@@ -226,6 +228,10 @@ class ParallelCollector:
                 else:
                     self.download(credentials, site, index)
             except BaseException as error:
+                if scanner and self.walk is None and isinstance(error,BackupError) and error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                    self.skip_unsafe('/',error,'dir')
+                    self.ready.set();self.scanned.set()
+                    return
                 with self.mutex:
                     if self.failure is None:
                         self.failure = error
@@ -266,7 +272,7 @@ class ParallelCollector:
                 checkpoint.validate_inventory(self.items)
             result = {"count": len(self.items), "bytes": sum(item["size_bytes"] for item in self.items),
                       "items": sorted(self.items, key=lambda item: item["path"]),
-                      'inventory_observed_since':self.walk.observed_at,'inventory_resumed':self.walk.resumed,
+                      'inventory_observed_since':getattr(self.walk,'observed_at',None),'inventory_resumed':getattr(self.walk,'resumed',False),
                       "directories": sorted(self.directories)}
             if self.errors:
                 result["errors"] = self.errors
@@ -349,15 +355,28 @@ class ParallelCollector:
                 return
             except queue.Full:pass
 
+    def skip_unsafe(self,path,error,kind='file'):
+        item=omission(path,error,kind)
+        with self.mutex:
+            if any(old['path']==item['path'] and old.get('reason')==item['reason'] for old in self.skipped):return
+            self.incomplete=True
+            self.skipped.append(item);self.errors.append(dict(item))
+            count=len(self.skipped)
+        log_omission(lambda event:self.emit(log=True,**event),item,count)
+
     def resume_pending(self):
         """Old checkpoints are enough to resume bytes before any tree listing."""
         with self.checkpoint.mutex:
             rows=list(self.checkpoint.db.execute("SELECT path,size,modified FROM files WHERE state='partial' ORDER BY committed DESC,path"))
         if len(rows)>self.max_files:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
         if sum(row['size'] for row in rows)>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+        pending_bytes=0
         for row in rows:
             self.control.checkpoint()
-            path=relative_path(row['path'])
+            try:path=relative_path(row['path'])
+            except BackupError as error:
+                if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                self.skip_unsafe(row['path'],error);continue
             expected=Entry(posixpath.basename(path),'file',row['size'],row['modified'])
             if expected.size<0 or expected.size>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
             try:
@@ -367,9 +386,22 @@ class ParallelCollector:
                 actual=retry_call(checked,wait=self.control.wait,
                     notify=lambda **event:self.emit(metadata_retry=True,**event),phase='RESUMING_FILES')
             except BackupError as error:
+                if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                    self.skip_unsafe(path,error);continue
                 if error.code in {'SOURCE_CHANGED','TRANSFER_DENIED','REMOTE_DIRECTORY_UNAVAILABLE'}:continue
                 raise
-            if actual!=expected:continue  # The ordinary walk handles a changed source.
+            if actual!=expected:
+                if not self.checkpoint.refresh_changed_sources or actual.kind!='file':continue
+                if actual.name!=expected.name:
+                    error=BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='SOURCE_NAME_CHANGED',
+                                      unsafe_path=display_path(path),expected_name=display_path(expected.name),actual_name=display_path(actual.name))
+                    if not self.continue_on_error:raise error
+                    self.skip_unsafe(path,error);continue
+                if actual.size<0 or actual.size>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                self.walk.update_entry(path,actual)
+                self.emit(stage='SOURCE_REFRESH',log=True,current_file=path)
+            pending_bytes+=actual.size
+            if pending_bytes>self.max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
             self.enqueue(path,actual)
             self.resumed_files+=1
             self.emit(stage='RESUMING_FILES')
@@ -400,6 +432,8 @@ class ParallelCollector:
             except BackupError as error:
                 self.emit(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
                           error_code=error.code, **error.details)
+                if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                    self.skip_unsafe(parent or '/',error,'dir');continue
                 isolated = error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
                     error.code=='SOURCE_CHANGED' and self.checkpoint.refresh_changed_sources)
                 if not parent or not self.continue_on_error or not isolated:
@@ -410,9 +444,19 @@ class ParallelCollector:
             self.directories_seen += 1
             for entry in entries:
                 self.control.checkpoint()
-                issue = name_compatibility_issue(entry.name)
+                try:
+                    issue = name_compatibility_issue(entry.name)
+                    if issue and not self.skip_names:
+                        raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(entry.name))
+                except BackupError as error:
+                    if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                    self.skip_unsafe(parent+('/' if parent else '')+(entry.name if isinstance(entry.name,str) else '<invalid name>'),error,entry.kind)
+                    continue
                 path = posixpath.join(parent, entry.name)
-                storage_key = (path if issue else self.checkpoint.storage_path(path)).casefold()
+                try:storage_key = (path if issue else self.checkpoint.storage_path(path)).casefold()
+                except BackupError as error:
+                    if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                    self.skip_unsafe(path,error,entry.kind);continue
                 if storage_key in seen:
                     peer, previous = seen[storage_key]
                     if not self.continue_on_error:
@@ -431,23 +475,23 @@ class ParallelCollector:
                         try:
                             directory_conflict(self.checkpoint,path,entry,peer,previous)
                         except BackupError as error:
+                            if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                                self.skip_unsafe(path,error,entry.kind);continue
                             if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                                 raise
                             self.errors.append({'path':path,'error_code':error.code,**error.details})
                             self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
                             continue
-                seen[(path if issue else self.checkpoint.storage_path(path)).casefold()] = (path, entry)
+                seen[storage_key] = (path, entry)
                 if len(seen) > self.max_files:
                     raise BackupError("TRANSFER_LIMIT_EXCEEDED")
                 if issue:
-                    if not self.skip_names:
-                        raise BackupError("REMOTE_PATH_UNSAFE")
-                    display_path = display_remote_path(path)
-                    omission = {"path": display_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
+                    displayed_path = display_remote_path(path)
+                    omission = {"path": displayed_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
                     self.skipped.append(omission)
                     self.errors.append(dict(omission))
                     self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
-                              skipped_path=display_path, skipped_kind=omission['kind'], skip_reason=issue,
+                              skipped_path=displayed_path, skipped_kind=omission['kind'], skip_reason=issue,
                               error_code="REMOTE_NAME_UNSUPPORTED")
                     continue
                 relative_path(path)
@@ -466,6 +510,8 @@ class ParallelCollector:
                     try:
                         self.checkpoint.prepare_directory(path,entry)
                     except BackupError as error:
+                        if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                            self.skip_unsafe(path,error,'dir');continue
                         if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                             raise
                         self.errors.append({'path':path,'error_code':error.code,**error.details})
@@ -483,10 +529,6 @@ class ParallelCollector:
                         saved = self.checkpoint.db.execute('SELECT size,modified FROM files WHERE path=?',(path,)).fetchone()
                     if (self.committed.get(path, (None, 0))[0] == 'done'
                             and saved and saved['size']==entry.size and saved['modified']==entry.modified):
-                        receipt=self.walk.receipt(path,entry)
-                        if receipt:
-                            self.items.append(receipt)
-                            continue
                         self.verify_queue.put_nowait((1, path, entry))
                         continue
                     self.enqueue(path,entry)
@@ -512,6 +554,13 @@ class ParallelCollector:
             item = None
             verified_signature = None
             try:
+                # Local filesystem/signature work belongs to the verifier, not
+                # the source-discovery thread feeding the transfer queue.
+                receipt=self.walk.receipt(path,entry)
+                if receipt:
+                    with self.mutex:
+                        self.items.append(receipt)
+                    continue
                 self.emit(stage='FILE_VERIFY', log=True)
                 def once():
                     nonlocal item,verified_signature
@@ -542,6 +591,8 @@ class ParallelCollector:
                     self.items.append(item)
             except BackupError as error:
                 self.emit(stage='FILE_ERROR', log=True, current_file=path, error_code=error.code, **error.details)
+                if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                    self.skip_unsafe(path,error);continue
                 if self.checkpoint.resolve_conflicts and error.code in {'LOCAL_FILE_CHANGED','SOURCE_CHANGED'}:
                     self.local_conflicts.append((path, entry))
                     continue
@@ -605,9 +656,9 @@ class ParallelCollector:
                     self.active[worker] = {"path": path, "size_bytes": entry.size, "received_bytes": 0}
                 is_verified_copy = False  # Saved unchanged files are handled only by verify_queue.
                 self.emit(stage="FILE_VERIFY" if is_verified_copy else "FILE_DOWNLOAD", log=True, current_file=path)
-                local = self.checkpoint.file_path(path)
                 final_event = {}
                 try:
+                    local = self.checkpoint.file_path(path)
                     def once():
                         self.control.checkpoint()
                         self.metadata.validate_parents(path)
@@ -632,6 +683,8 @@ class ParallelCollector:
                     self.verify_queue.put_nowait((0, path, entry))
                 except BackupError as error:
                     self.emit(stage="FILE_ERROR", log=True, current_file=path, error_code=error.code, **error.details)
+                    if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                        self.skip_unsafe(path,error);continue
                     if not self.continue_on_error or error.code not in {
                         "SOURCE_CHANGED", "TRANSFER_DENIED", "LOCAL_FILE_CHANGED", "LOCAL_PROGRESS_INVALID",
                         "REMOTE_DIRECTORY_UNAVAILABLE", 'FILE_CONFLICT_PENDING', 'FILE_CONFLICT_SKIPPED',
@@ -665,6 +718,8 @@ class ParallelCollector:
                         raise BackupError('SOURCE_CHANGED')
                     self.items.append(self.checkpoint.verify_done(path,entry,self.control))
                 except BackupError as error:
+                    if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                        self.skip_unsafe(path,error);continue
                     if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED','SOURCE_CHANGED','LOCAL_FILE_CHANGED'}:
                         raise
                     self.errors.append({'path':path,'error_code':error.code,**error.details})
@@ -680,6 +735,8 @@ class ParallelCollector:
                         self.items.append(self.checkpoint.verify_done(path,entry,self.control))
                     self.emit(stage='FILE_RECONCILED',log=True,**outcome)
                 except BackupError as error:
+                    if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                        self.skip_unsafe(path,error);continue
                     if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED','SOURCE_CHANGED','LOCAL_FILE_CHANGED'}:
                         raise
                     self.errors.append({'path':path,'error_code':error.code,**error.details})

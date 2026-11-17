@@ -18,6 +18,7 @@ from .importers import valid_endpoint
 from .state import private_dir, safe_root
 from .storage import CHUNK, sha256_file
 from .retry import retry_call
+from .unsafe_paths import display_path,omission as unsafe_omission,log_omission
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,10 @@ class Entry:
 
 def name_compatibility_issue(name):
     """Separate skippable Windows names from always-fatal path structure."""
-    if (not isinstance(name, str) or not name or name in {".", ".."}
-            or re.search(r'[\x00-\x1f\x7f/\\]', name)):
-        raise BackupError("REMOTE_PATH_UNSAFE")
+    reason=('INVALID_NAME_TYPE' if not isinstance(name,str) else 'EMPTY_NAME' if not name
+            else 'DOT_SEGMENT' if name in {'.','..'} else 'CONTROL_CHARACTER' if re.search(r'[\x00-\x1f\x7f]',name)
+            else 'EMBEDDED_SEPARATOR' if re.search(r'[/\\]',name) else None)
+    if reason:raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=reason,unsafe_name=display_path(name))
     if re.search(r'[\ud800-\udfff]', name):
         return "INVALID_UTF8_NAME"
     if re.search(r'[:<>"|?*]', name):
@@ -50,8 +52,8 @@ def display_remote_path(path):
 
 
 def safe_name(name):
-    if name_compatibility_issue(name):
-        raise BackupError("REMOTE_PATH_UNSAFE")
+    issue=name_compatibility_issue(name)
+    if issue:raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(name))
     return name
 
 
@@ -149,7 +151,7 @@ class FtpsSource:
         except ftplib.error_perm as error:
             raise self._listing_rejection(error, "PWD") from None
         if self.canonical_root != "/" and canonical != self.canonical_root and not canonical.startswith(self.canonical_root + "/"):
-            raise BackupError("REMOTE_PATH_UNSAFE")
+            raise BackupError("REMOTE_PATH_UNSAFE",unsafe_reason='OUTSIDE_ALLOWED_ROOT',unsafe_path=display_path(relative),operation='PWD')
         return canonical
 
     @staticmethod
@@ -315,7 +317,7 @@ class SftpSource:
         path = posixpath.join(self.root, relative_path(relative))
         canonical = self.sftp.normalize(path)
         if canonical != self.root and not canonical.startswith(self.root.rstrip("/") + "/"):
-            raise BackupError("REMOTE_PATH_UNSAFE")
+            raise BackupError("REMOTE_PATH_UNSAFE",unsafe_reason='OUTSIDE_ALLOWED_ROOT',unsafe_path=display_path(relative),operation='SFTP_NORMALIZE')
         return path
 
     @staticmethod
@@ -393,6 +395,9 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
     total = planned = 0
     errors=[]
     skipped=[]
+    def skip_unsafe(path,error,kind='file'):
+        item=unsafe_omission(path,error,kind);skipped.append(item);errors.append(dict(item))
+        if checkpoint:log_omission(checkpoint.notify,item,len(skipped))
     while queue:
         parent, depth = queue.pop()
         if depth > 64:
@@ -406,6 +411,8 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                 except BackupError as changed:
                     if changed.code!='SOURCE_CHANGED' or not checkpoint or not checkpoint.refresh_changed_sources or refresh==2:raise
         except BackupError as error:
+            if continue_on_error and error.code=='REMOTE_PATH_UNSAFE':
+                skip_unsafe(parent or '/',error,'dir');continue
             isolated=error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
                 error.code=='SOURCE_CHANGED' and checkpoint and checkpoint.refresh_changed_sources)
             if not parent or not continue_on_error or not isolated:
@@ -415,11 +422,19 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
         for entry in entries:
             if time.monotonic() > deadline:
                 raise BackupError("TRANSFER_TIMEOUT")
-            issue = name_compatibility_issue(entry.name)
-            if issue and not skip_unsupported_names:
-                raise BackupError("REMOTE_PATH_UNSAFE")
+            try:
+                issue = name_compatibility_issue(entry.name)
+                if issue and not skip_unsupported_names:
+                    raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(entry.name))
+            except BackupError as error:
+                if not continue_on_error or error.code!='REMOTE_PATH_UNSAFE':raise
+                skip_unsafe(parent+('/' if parent else '')+(entry.name if isinstance(entry.name,str) else '<invalid name>'),error,entry.kind)
+                continue
             relative = posixpath.join(parent, entry.name)
-            storage_key = (checkpoint.storage_path(relative) if checkpoint and not issue else relative).casefold()
+            try:storage_key = (checkpoint.storage_path(relative) if checkpoint and not issue else relative).casefold()
+            except BackupError as error:
+                if error.code!='REMOTE_PATH_UNSAFE' or not continue_on_error:raise
+                skip_unsafe(relative,error,entry.kind);continue
             if storage_key in seen:
                 peer, previous = seen[storage_key]
                 if not continue_on_error or checkpoint is None:
@@ -440,12 +455,14 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                         from .file_conflicts import directory_conflict
                         directory_conflict(checkpoint,relative,entry,peer,previous)
                 except BackupError as error:
+                    if continue_on_error and error.code=='REMOTE_PATH_UNSAFE':
+                        skip_unsafe(relative,error,entry.kind);continue
                     if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                         raise
                     errors.append({'path':relative,'error_code':error.code,**error.details})
                     checkpoint.notify({'stage':'FILE_CONFLICT','error_code':error.code,**error.details})
                     continue
-            seen[(checkpoint.storage_path(relative) if checkpoint and not issue else relative).casefold()] = (relative, entry)
+            seen[storage_key] = (relative, entry)
             if len(seen) > max_files:
                 raise BackupError("TRANSFER_LIMIT_EXCEEDED")
             if issue:
@@ -461,12 +478,17 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                 skipped.append(omission)
                 errors.append(dict(omission))
                 continue
-            local = checkpoint.file_path(relative) if checkpoint else destination.joinpath(*relative.split("/"))
+            try:local = checkpoint.file_path(relative) if checkpoint else destination.joinpath(*relative.split("/"))
+            except BackupError as error:
+                if error.code!='REMOTE_PATH_UNSAFE' or not continue_on_error:raise
+                skip_unsafe(relative,error,entry.kind);continue
             if entry.kind == "dir":
                 if checkpoint:
                     try:
                         checkpoint.prepare_directory(relative,entry)
                     except BackupError as error:
+                        if error.code=='REMOTE_PATH_UNSAFE' and continue_on_error:
+                            skip_unsafe(relative,error,'dir');continue
                         if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                             raise
                         errors.append({'path':relative,'error_code':error.code,**error.details})
@@ -494,7 +516,7 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                     if current != entry:
                         if not checkpoint or not checkpoint.refresh_changed_sources or current.kind!='file':
                             raise BackupError("SOURCE_CHANGED")
-                        if current.name!=entry.name:raise BackupError('REMOTE_PATH_UNSAFE')
+                        if current.name!=entry.name:raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='SOURCE_NAME_CHANGED',expected_name=display_path(entry.name),actual_name=display_path(current.name))
                         planned+=current.size-entry.size
                         if current.size<0 or planned>max_bytes:raise BackupError('TRANSFER_LIMIT_EXCEEDED')
                         entry=current
@@ -520,6 +542,8 @@ def collect_files(source, destination, *, max_bytes, max_files, timeout_seconds,
                     except BackupError as changed:
                         if changed.code!='SOURCE_CHANGED' or not checkpoint or not checkpoint.refresh_changed_sources or refresh==2:raise
             except BackupError as exc:
+                if continue_on_error and exc.code=='REMOTE_PATH_UNSAFE':
+                    skip_unsafe(relative,exc,entry.kind);continue
                 if not continue_on_error or exc.code not in {'SOURCE_CHANGED','TRANSFER_DENIED',
                         'LOCAL_FILE_CHANGED','LOCAL_PROGRESS_INVALID','FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                     raise

@@ -11,6 +11,7 @@ from .account_batch import completed_database_copy
 from .bulk import DownloadBatch, Server, ServerPlan
 from .downloads import FileLock, local_path
 from .errors import BackupError
+from .unsafe_paths import display_path,omission,log_omission
 from .importers import identity
 from .panel import JinoPanelBrowser
 from .panel_downloads import PanelFileJob, PanelFileSource
@@ -82,17 +83,28 @@ class ControlledSource:
                 except BackupError as error:
                     self.progress(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
                                   error_code=error.code, **error.details)
+                    if self.continue_on_error and error.code=='REMOTE_PATH_UNSAFE':
+                        skipped_count+=1
+                        log_omission(lambda event:self.progress(log=True,**event),omission(parent or '/',error,'dir'),skipped_count)
+                        self.inventory_errors[parent]=error
+                        continue
                     if not parent or not self.continue_on_error or error.code not in {'REMOTE_DIRECTORY_UNAVAILABLE','SOURCE_CHANGED'}:
                         raise
                     self.inventory_errors[parent] = error
                     continue
                 self.inventory[parent] = entries
                 for entry in entries:
-                    issue = name_compatibility_issue(entry.name)
+                    try:
+                        issue = name_compatibility_issue(entry.name)
+                        if issue and not self.skip_unsupported_names:
+                            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(entry.name))
+                    except BackupError as error:
+                        if not self.continue_on_error or error.code!='REMOTE_PATH_UNSAFE':raise
+                        skipped_count+=1
+                        log_omission(lambda event:self.progress(log=True,**event),omission(parent+('/' if parent else '')+(entry.name if isinstance(entry.name,str) else '<invalid name>'),error,entry.kind),skipped_count)
+                        continue
                     path = posixpath.join(parent, entry.name)
                     if issue:
-                        if not self.skip_unsupported_names:
-                            raise BackupError("REMOTE_PATH_UNSAFE")
                         skipped_count += 1
                         self.progress(stage="FILE_SKIPPED", log=True, error_code="REMOTE_NAME_UNSUPPORTED",
                                       skipped_count=skipped_count, skipped_path=display_remote_path(path),
@@ -273,7 +285,7 @@ class OperatorRunner:
                 def factory():
                     scope = panel.inspect_files()
                     return ControlledSource(
-                        RecoveringSource(PanelFileSource(panel, scope, skip_unsupported_names=skip_names), wait=control.wait, notify=progress), control, progress, output,
+                        RecoveringSource(PanelFileSource(panel, scope, skip_unsupported_names=skip_names,continue_on_error=True), wait=control.wait, notify=progress), control, progress, output,
                         skip_unsupported_names=skip_names, continue_on_error=True,
                     )
 
@@ -344,7 +356,7 @@ class OperatorRunner:
         failures=[result for result in results if result['status'] not in {'DB_ONLY','INSPECTED'}]
         dates={result.get('source_snapshot_date') for result in results}
         return {'status':failures[0]['status'] if failures else ('INSPECTED' if task.get('inspect_only') else 'DB_ONLY'),
-                **({'error_code':failures[0]['error_code']} if failures else {}),
+                **({'error_code':failures[0]['error_code']} if failures and failures[0].get('error_code') else {}),
                 'databases_count':verified,'artifacts':[item for result in results for item in result.get('artifacts',[])],
                 'engine_results':results,'source_snapshot_date':next(iter(dates)) if len(dates)==1 else None,
                 'capture_consistency':'BEST_EFFORT','application_restore_tested':False,'files_included':False}
@@ -439,7 +451,8 @@ class OperatorRunner:
                                        None if event.get('source_snapshot_verified') is False else snapshot, event['time'], event['size_bytes'],
                                        warnings=sql_warnings.get(event['db_alias']))
             progress(stage=event["stage"], verified_count=verified, received_bytes=received,
-                     **({'warning_code':event['warning_code']} if event.get('warning_code') else {}))
+                         **({'warning_code':event['warning_code']} if event.get('warning_code') else {}),
+                         **({'unsafe_reason':event['unsafe_reason']} if event.get('unsafe_reason') else {}))
 
         panel.download_progress = lambda amount, total: progress(
             received_bytes=received + amount,

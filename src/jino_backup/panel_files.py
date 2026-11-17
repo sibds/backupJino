@@ -58,10 +58,10 @@ def resolve_export_directory(read,root,snapshot_date):
             raise BackupError('REMOTE_PATH_AMBIGUOUS')
         entry=matches[0]
         if entry.get('type')!='dir' or entry.get('targetType') is not None or entry.get('targetDisplayPath') is not None:
-            raise BackupError('REMOTE_PATH_UNSAFE')
+            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='UNSAFE_DIRECTORY_TYPE')
         token=entry.get('path')
         if not isinstance(token,str) or not token:
-            raise BackupError('REMOTE_PATH_UNSAFE')
+            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='INVALID_TOKEN')
     return token
 
 

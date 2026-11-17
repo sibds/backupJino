@@ -14,6 +14,55 @@ def collector(metadata,downloader):
                              metadata_factory=metadata,download_factory=downloader)
 
 
+def test_saved_receipt_io_does_not_block_discovery_of_new_files(tmp_path,monkeypatch):
+    from jino_backup.resume_inventory import ResumeInventory
+    remote=tmp_path/'remote';remote.mkdir()
+    (remote/'a-old').write_bytes(b'old');(remote/'z-new').write_bytes(b'new')
+    copy=tmp_path/'copy';downloaded=threading.Event()
+    original=ResumeInventory.receipt
+    def slow_receipt(self,path,entry):
+        if path=='a-old':
+            assert downloaded.wait(3), 'Local verification blocked source discovery'
+        return original(self,path,entry)
+    monkeypatch.setattr(ResumeInventory,'receipt',slow_receipt)
+    def downloader(*args):
+        source=FixtureSource(remote);fetch=source.download
+        def download(path,output,offset):
+            fetch(path,output,offset)
+            if path=='z-new':downloaded.set()
+        source.download=download;return source
+    source=FixtureSource(remote)
+    with DirectoryCheckpoint(copy,'scope') as checkpoint:
+        checkpoint.fetch(source,'a-old',source.stat('a-old'),copy/'files/a-old',float('inf'))
+        result=collector(lambda *a:FixtureSource(remote),downloader).collect({}, {'remote_root':'/'},copy,checkpoint)
+    assert result['count']==2
+
+
+def test_changed_partial_is_downloaded_before_full_walk(tmp_path):
+    from jino_backup.transfer import Entry
+    remote=tmp_path/'remote';remote.mkdir();(remote/'big.bin').write_bytes(b'changed-content')
+    downloaded=threading.Event();offsets=[]
+    def metadata(*args):
+        source=FixtureSource(remote);listing=source.listdir
+        def listdir(path):
+            assert downloaded.wait(3), 'Changed partial waited for a full tree walk'
+            return listing(path)
+        source.listdir=listdir;return source
+    def downloader(*args):
+        source=FixtureSource(remote);fetch=source.download
+        def download(path,output,offset):
+            offsets.append(offset);fetch(path,output,offset);downloaded.set()
+        source.download=download;return source
+    copy=tmp_path/'copy'
+    with DirectoryCheckpoint(copy,'scope') as checkpoint:
+        checkpoint.refresh_changed_sources=True
+        checkpoint.record('big.bin',Entry('big.bin','file',9,'old'),'partial',3,hashlib.sha256(b'123').hexdigest())
+        (checkpoint.work/(hashlib.sha256(b'big.bin').hexdigest()+'.part')).write_bytes(b'123')
+        result=collector(metadata,downloader).collect({}, {'remote_root':'/'},copy,checkpoint)
+    assert result['count']==1 and offsets==[0]
+    assert (copy/'files/big.bin').read_bytes()==b'changed-content'
+
+
 def test_partial_continues_before_root_listing(tmp_path):
     remote=tmp_path/'remote';remote.mkdir();(remote/'big.bin').write_bytes(b'123456789')
     downloaded=threading.Event();offsets=[]

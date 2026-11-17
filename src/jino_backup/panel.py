@@ -484,7 +484,7 @@ class JinoPanelBrowser:
             if len(matches)!=1:raise BackupError('SOURCE_CHANGED')
             parent=matches[0]
             if parent.get('type')!='dir' or parent.get('targetType') is not None or parent.get('targetDisplayPath') is not None:
-                raise BackupError('REMOTE_PATH_UNSAFE')
+                raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason='UNSAFE_DIRECTORY_TYPE')
             items=self._list(parent['path'])
         matches=[item for item in items if item.get('path')==remote['path']]
         if len(matches)!=1:raise BackupError('SOURCE_CHANGED')
