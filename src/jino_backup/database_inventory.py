@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from cryptography.fernet import Fernet, InvalidToken
 from .errors import BackupError
 from .importers import identity
+from .db_engines import database_alias
 from .state import private_dir
 
 
@@ -107,11 +108,11 @@ class DatabaseInventory:
                 'SELECT payload FROM export_inventory WHERE row_id=? AND revision=?',(row,revision))]
         return reconcile_export_entries(candidates,[record for record in records if record.get('export_directory_date')==snapshot])
 
-    def discover(self, row, revision, account, names, snapshot=None):
+    def discover(self, row, revision, account, names, snapshot=None,*,engine='mysql'):
         if not isinstance(names, list) or not all(isinstance(n, str) and n and not any(ord(c)<32 for c in n) for n in names):
             raise BackupError('DATABASE_SCOPE_UNVERIFIED')
         for name in names:
-            self._update(row, revision, identity('db', account, name), name=name,
+            self._update(row, revision, database_alias(account,name,engine), name=name,engine=engine,
                          **({'available_snapshot_date':snapshot} if snapshot else {}))
 
     def verified(self, row, revision, alias, snapshot, downloaded_at, size, *, warnings=None):
@@ -165,7 +166,11 @@ class DatabaseInventory:
         # Called before starting workers, never by HTTP polling. Active journals are not read.
         if self.cipher is None:
             return
+        expanded=[]
         for task in tasks:
+            results=(task.get('result') or {}).get('engine_results')
+            expanded.extend([{**task,'result':result} for result in results] if results else [task])
+        for task in expanded:
             if task['kind'] != 'databases' or task['state'] in {'RUNNING','PAUSING','STOPPING'}:
                 continue
             server = catalog.get(task['row'], include_deleted=True)
@@ -184,7 +189,7 @@ class DatabaseInventory:
                 if scope.get('account_ref') != server['account_ref']:
                     continue
                 entries = state.get('databases', {})
-                self.discover(task['row'], task['revision'], server['account_ref'], [x['name'] for x in entries.values()])
+                self.discover(task['row'], task['revision'], server['account_ref'], [x['name'] for x in entries.values()],engine=scope.get('database_engine','mysql'))
                 times = {}
                 events = path.with_suffix('.events.jsonl')
                 if events.is_file():

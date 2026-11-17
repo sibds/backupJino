@@ -25,6 +25,7 @@ from .state import Settings, write_json, private_dir
 
 
 ERROR_LABELS = {
+    'DATABASE_ENGINE_UNSUPPORTED':'Тип базы данных не поддерживается',
     'FILE_CONFLICT_PENDING':'Конфликт имён или содержимого: требуется решение. Остальная выгрузка продолжается.',
     'FILE_CONFLICT_SKIPPED':'Конфликтующий серверный объект пропущен по решению пользователя.',
     'REMOTE_PATH_COLLISION':'Совпадение локальных путей для разных серверных имён.',

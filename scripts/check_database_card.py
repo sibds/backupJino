@@ -25,7 +25,8 @@ def main():
     account = management.catalog.get(1)['account_ref']
     names = ['client_catalog','client_catalog_long_database_name_for_mobile_layout',
              'client_orders','client_sessions','client_statistics','client_unsaved']
-    management.inventory.discover(1,1,account,names,snapshot='2026-11-13')
+    management.inventory.discover(1,1,account,names[:-1],snapshot='2026-11-13')
+    management.inventory.discover(1,1,account,[names[-1]],snapshot='2026-11-13',engine='postgresql')
     items = management.inventory.list(1,1)
     for index, size, snapshot, downloaded in ((0,123456,'2026-11-13','2026-11-13T01:00:00+00:00'),
         (1,8388608,'2026-11-10','2026-11-14T01:00:00+00:00'),(2,0,'2026-11-13',None),
@@ -56,6 +57,7 @@ def main():
                 page.goto(f'http://127.0.0.1:{server.server_port}/#server/1',wait_until='networkidle')
                 page.locator('[data-card-tab="databases"]').click()
                 expect(page.locator('.database-item')).to_have_count(6)
+                expect(page.locator('.database-item').filter(has_text='client_unsaved')).to_contain_text('PostgreSQL')
                 expect(page.locator('#database-catalog-summary')).to_contain_text('Скачано 4 из 6')
                 expect(page.locator('#db-download-missing')).to_have_text('Скачать недостающие (2)')
                 expect(page.locator('#db-download-missing')).to_be_enabled()

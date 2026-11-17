@@ -245,7 +245,7 @@
           item.append(node('p','notice warning','Назначение SQL не подтверждено. Укажите БД только если уверены в соответствии файла.'));
           const label=node('label','','Этот SQL относится к БД');const select=node('select','');
           const empty=node('option','','Выберите БД');empty.value='';select.append(empty);
-          for (const db of (detail.server.database_inventory || []).filter(db=>!task.db_aliases || task.db_aliases.includes(db.db_alias))) {
+          for (const db of (detail.server.database_inventory || []).filter(db=>(!task.db_aliases || task.db_aliases.includes(db.db_alias)) && (db.engine || 'mysql')===(candidate.database_engine || 'mysql'))) {
             const option=node('option','',db.name);option.value=db.db_alias;select.append(option);
           }
           select.value=assignments.get(candidate.id) || '';select.disabled=pending;
@@ -1294,6 +1294,7 @@
         copy.saved ? 'Скачано · проверено' : 'Нет проверенной копии'));
       const nameGroup = node('div','database-name-group'); nameGroup.append(checkbox,name);
       info.append(nameGroup);
+      info.append(node('span','helper',item.engine==='postgresql'?'PostgreSQL':'MySQL'));
       if (item.warnings?.includes('SQL_NO_OBJECTS'))
         info.append(node('span','database-copy-state warning','Дамп без объектов. Проверьте, что БД пустая.'));
       if (item.warnings?.includes('EXISTING_EXPORT_SOURCE_DATE_UNVERIFIED'))

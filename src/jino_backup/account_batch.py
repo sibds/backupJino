@@ -37,7 +37,7 @@ def account_plan(path,mapping):
     return {'rows_total':len(rows),'accounts_ready':len(selected),'needs_review':len(issues),'issues':issues},selected
 
 
-def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*,allow_subset=False):
+def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*,allow_subset=False,on_reuse=None):
     directory=Path(state_dir)/'panel_jobs'
     cipher=Fernet(key)
     for path in directory.glob('*.enc'):
@@ -53,6 +53,7 @@ def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*
         state=json.loads(cipher.decrypt(path.read_bytes()))
         binding=state.get('scope',{})
         if ((not allow_subset and state.get('phase')!='DB_ONLY') or binding.get('account_ref')!=account_ref
+                or binding.get('database_engine','mysql')!=scope.get('database_engine','mysql')
                 or binding.get('snapshot_date')!=scope['snapshot_date'] or state.get('snapshot_ref')!=scope['snapshot_ref']):
             continue
         entries=state.get('databases',{})
@@ -75,13 +76,14 @@ def completed_database_copy(state_dir,destination,account_ref,folder,scope,key,*
             if not file.is_file() or file.stat().st_size!=artifact['size_bytes'] or sha256_file(file)!=artifact['sha256']:
                 raise BackupError('DB_INTEGRITY_FAILED',repair_job_id=path.stem)
             try:
-                warnings=validate_panel_sql(file) or []
+                warnings=validate_panel_sql(file,engine=scope.get('database_engine','mysql')) or []
             except BackupError as error:
                 if error.code=='DB_INTEGRITY_FAILED':
                     raise BackupError('DB_INTEGRITY_FAILED',repair_job_id=path.stem) from None
                 raise
             artifacts.append({**artifact,**({'warnings':warnings} if warnings else {})})
         warnings=sorted({w for a in artifacts for w in a.get('warnings',[])})
+        if on_reuse:on_reuse(entries)
         return {'status':'DB_ONLY','job_id':path.stem,'databases_count':len(artifacts),
                 'artifacts':artifacts,**({'warnings':warnings} if warnings else {}),
                 'source_snapshot_date':scope['snapshot_date'],'reused_existing':True}

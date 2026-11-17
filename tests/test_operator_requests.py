@@ -98,6 +98,9 @@ def test_existing_sql_assignment_requires_known_alias_in_current_scope(managemen
     with pytest.raises(BackupError):management.resolve_request(task['id'],payload)
     assert management.inventory.export_candidates(1,1,task['id'])[0]['db_alias'] is None
     payload['selections'][0]['db_alias']=alias
+    management.inventory.save_export_candidates(1,1,task['id'],[{**candidate,'database_engine':'postgresql'}])
+    with pytest.raises(BackupError):management.resolve_request(task['id'],payload)
+    management.inventory.save_export_candidates(1,1,task['id'],[candidate])
     management.resolve_request(task['id'],payload)
     assert management.task(task['id'])['export_decisions']=={candidate['id']:'new_version'}
     assert management.inventory.export_candidates(1,1,task['id'])[0]['db_alias']==alias

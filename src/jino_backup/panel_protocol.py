@@ -55,13 +55,22 @@ def _session_only_sql(data, settings):
     return True
 
 
-def validate_panel_sql(path):
+def validate_panel_sql(path,*,engine='mysql'):
+    from .db_engines import database_engine
+    database_engine(engine)
     path=Path(path)
     size=path.stat().st_size
     with path.open('rb') as stream:
         head=stream.read(min(8192,size))
         stream.seek(max(0,size-8192))
         tail=stream.read(8192)
+    if engine=='postgresql':
+        lines=head.splitlines()
+        if (b'-- PostgreSQL database dump' not in lines[:8]
+                or b'-- PostgreSQL database dump complete' not in tail.splitlines()
+                or re.search(rb'(?mi)^(?:ERROR:|FATAL:|pg_dump: error:)',head+tail)):
+            raise BackupError('DB_INTEGRITY_FAILED')
+        return
     if head.startswith(b'-- MySQL dump ') and b'-- Dump completed on ' in tail:
         return
     settings=('CHARACTER_SET_CLIENT','CHARACTER_SET_RESULTS','COLLATION_CONNECTION','TIME_ZONE',
@@ -75,9 +84,12 @@ def validate_panel_sql(path):
         raise BackupError('DB_INTEGRITY_FAILED')
 
 
-def export_payload_allowed(payload,variables):
+def export_payload_allowed(payload,variables,*,engine='mysql'):
+    from .db_engines import database_engine
+    database_engine(engine)
+    query=RESTORE_QUERY if engine=='mysql' else RESTORE_QUERY.replace('restoreMySQLBackup','restorePostgreSQLBackup')
     return (isinstance(payload,dict) and payload.get('variables')==variables
-            and re.sub(r'\s+','',payload.get('query',''))==re.sub(r'\s+','',RESTORE_QUERY))
+            and re.sub(r'\s+','',payload.get('query',''))==re.sub(r'\s+','',query))
 
 
 def check_owned_listing(items,owned_paths):

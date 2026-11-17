@@ -26,17 +26,23 @@ def canonical_account_root(home,requested):
 
 
 def latest_mysql_snapshot(rows):
+    return latest_database_snapshot(rows,'mysql')
+
+
+def latest_database_snapshot(rows,engine):
+    from .db_engines import ENGINE_LABELS,database_engine
+    database_engine(engine)
     from .panel import MONTHS,select_snapshot_row
     import re
     dates=[]
     for row in rows:
-        if 'MySQL' not in row.get('kinds',''):
+        if ENGINE_LABELS[engine] not in row.get('kinds',''):
             continue
         match=re.fullmatch(r'Копия от (\d{1,2}) (\S+) (\d{4})',row.get('label','').strip())
         if not match or match[2] not in MONTHS:
             raise BackupError('UI_CHANGED')
         value=date(int(match[3]),MONTHS[match[2]],int(match[1])).isoformat()
-        select_snapshot_row(rows,value)
+        select_snapshot_row(rows,value,engine=engine)
         dates.append(value)
     return max(dates) if dates else None
 

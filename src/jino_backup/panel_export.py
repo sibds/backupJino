@@ -19,6 +19,7 @@ from .importers import identity
 from .state import private_dir, replace_with_retry, safe_id, write_json
 from .storage import sha256_file
 from .server_folders import server_work
+from .db_engines import database_alias, database_engine as check_engine
 
 
 def atomic_bytes(path, value):
@@ -38,7 +39,8 @@ class PanelExportJob:
     def __init__(self, state_dir, destination, account_ref, idempotency_key,
                  snapshot_date, key, panel_factory, *, timeout_seconds=300,
                  max_bytes=10*1024**3, notify=None,cleanup_remote=False,server_folder=None,control=None,selected_aliases=None,
-                 resume_job_id=None,existing_exports=None,defer_export_conflicts=False,inventory_callback=None,collision_callback=None):
+                 resume_job_id=None,existing_exports=None,defer_export_conflicts=False,inventory_callback=None,collision_callback=None,database_engine='mysql'):
+        self.database_engine=check_engine(database_engine)
         try:
             if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
                 raise ValueError
@@ -51,6 +53,7 @@ class PanelExportJob:
         self.root = Path(state_dir).resolve() / 'panel_jobs'
         safe_id(account_ref)
         self.job_id = identity('panel-job', account_ref, idempotency_key)
+        if database_engine!='mysql':self.job_id=identity('panel-job',account_ref,database_engine,idempotency_key)
         if resume_job_id is not None:
             if not isinstance(resume_job_id,str) or not re.fullmatch('panel-job-[a-f0-9]{24}',resume_job_id):
                 raise BackupError('REQUEST_INVALID')
@@ -92,6 +95,7 @@ class PanelExportJob:
 
     def _load(self):
         scope = {'account_ref':self.account_ref,'snapshot_date':self.snapshot_date,'output':str(self.output)}
+        if self.database_engine!='mysql':scope['database_engine']=self.database_engine
         if self.selected_aliases is not None:
             scope['selected_db_aliases'] = self.selected_aliases
         if self.private_path.exists():
@@ -124,6 +128,7 @@ class PanelExportJob:
                      if entry.get('artifact') and entry['artifact'].get('validation')=='PASS']
         warnings=sorted({warning for artifact in artifacts for warning in artifact.get('warnings',[])})
         return {'job_id':self.job_id,'account_ref':self.account_ref,'status':status,
+                'database_engine':self.database_engine,
                 'test_passed':status=='DB_ONLY','source_snapshot_at':None,
                 'source_snapshot_date':None if any(x.get('source_snapshot_verified') is False for x in artifacts) else self.snapshot_date,
                 'snapshot_time_precision':'unknown' if any(x.get('source_snapshot_verified') is False for x in artifacts) else 'day',
@@ -139,7 +144,7 @@ class PanelExportJob:
         file = local_path(self.output,artifact['relative_path'])
         if not file.is_file() or file.stat().st_size != artifact['size_bytes'] or sha256_file(file) != artifact['sha256']:
             raise BackupError('DB_INTEGRITY_FAILED')
-        warnings=validate_sql(file) or []
+        warnings=validate_sql(file,engine=self.database_engine) or []
         if warnings:
             artifact['warnings']=sorted(set(artifact.get('warnings',[])+warnings))
         return warnings
@@ -204,6 +209,8 @@ class PanelExportJob:
                 with self.panel_factory() as panel:
                     self._event('INSPECT_SNAPSHOT')
                     scope = panel.inspect(self.snapshot_date)
+                    if scope.get('database_engine','mysql')!=self.database_engine:
+                        raise BackupError('DATABASE_SCOPE_UNVERIFIED')
                     if not scope.get('binding_verified'):
                         raise BackupError('PROFILE_UNVERIFIED')
                     if scope.get('snapshot_date') != self.snapshot_date:
@@ -213,7 +220,7 @@ class PanelExportJob:
                         raise BackupError('DATABASE_SCOPE_UNVERIFIED')
                     if self.selected_aliases is not None:
                         selected = set(self.selected_aliases)
-                        available = {identity('db', self.account_ref, name):name for name in names}
+                        available = {database_alias(self.account_ref,name,self.database_engine):name for name in names}
                         if not selected or not selected <= available.keys():
                             raise BackupError('DATABASE_SCOPE_UNVERIFIED')
                         names = [name for alias,name in available.items() if alias in selected]
@@ -241,7 +248,7 @@ class PanelExportJob:
                     self._prepare_output()
                     if any(x['phase']=='FAILED_CLEANED' for x in self.state['databases'].values()):
                         raise BackupError('PREVIOUS_EXPORT_FAILED')
-                    aliases = {identity('db',self.account_ref,name):name for name in names}
+                    aliases = {database_alias(self.account_ref,name,self.database_engine):name for name in names}
                     if set(self.state['databases']) - set(aliases):
                         raise BackupError('DATABASE_SCOPE_CHANGED')
                     pending=[]
@@ -399,7 +406,7 @@ class PanelExportJob:
                         if candidate==partial or candidate.is_symlink() or candidate.stat().st_size!=remote.get('size_bytes'):
                             continue
                         try:
-                            validate_sql(candidate)
+                            validate_sql(candidate,engine=self.database_engine)
                         except BackupError:
                             continue
                         reusable=candidate
@@ -415,12 +422,13 @@ class PanelExportJob:
                         panel.download(scope,remote,partial,self.max_bytes)
                     if not partial.is_file() or not 0 < partial.stat().st_size <= self.max_bytes:
                         raise BackupError('DB_EXPORT_LIMIT_EXCEEDED')
-                    warnings=validate_sql(partial) or []
+                    warnings=validate_sql(partial,engine=self.database_engine) or []
                     if entry.get('imported_existing'):panel.check_existing_export(scope,remote)
                     if entry.get('imported_existing') and partial.stat().st_size!=remote['size_bytes']:raise BackupError('SOURCE_CHANGED')
                     artifact={'db_alias':alias,'relative_path':relative,
                               'size_bytes':partial.stat().st_size,'sha256':sha256_file(partial),
                               'validation':'PASS'}
+                    if self.database_engine!='mysql':artifact['database_engine']=self.database_engine
                     if warnings:
                         artifact['warnings']=warnings
                     if entry.get('imported_existing'):

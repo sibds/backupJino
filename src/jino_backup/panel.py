@@ -14,6 +14,7 @@ from urllib.parse import unquote,urlsplit
 
 from .errors import BackupError
 from .importers import identity,jino_rows,parse_jino
+from .db_engines import ENGINE_LABELS, database_engine
 
 
 @dataclass
@@ -44,10 +45,11 @@ MONTHS = dict(zip(('января','февраля','марта','апреля','
                    'сентября','октября','ноября','декабря'),range(1,13)))
 
 
-def select_snapshot_row(rows,snapshot_date):
+def select_snapshot_row(rows,snapshot_date,*,engine='mysql'):
+    database_engine(engine)
     matches = []
     for row in rows:
-        if 'MySQL' not in row.get('kinds',''):
+        if ENGINE_LABELS[engine] not in row.get('kinds',''):
             continue
         match = re.fullmatch(r'Копия от (\d{1,2}) (\S+) (\d{4})',row.get('label','').strip())
         if not match or match[2] not in MONTHS:
@@ -85,7 +87,9 @@ def unpack_json(value):
 
 
 class JinoPanelBrowser:
-    def __init__(self,credentials,*,channel='chrome',timeout_seconds=300,research_dir=None):
+    def __init__(self,credentials,*,channel='chrome',timeout_seconds=300,research_dir=None,database_engine='mysql'):
+        self.database_engine=database_engine
+        if database_engine not in ENGINE_LABELS:raise BackupError('DATABASE_ENGINE_UNSUPPORTED')
         self.credentials = credentials
         self.channel, self.timeout_seconds = channel,timeout_seconds
         self.pw = self.browser = self.context = self.page = None
@@ -217,12 +221,13 @@ class JinoPanelBrowser:
         if not self.page.url.split('?')[0].rstrip('/').endswith('/backups'):
             self._one(self.page.get_by_role('link',name='Бэкапы',exact=True)).click()
         self.page.locator('.backups-page__row').first.wait_for(state='visible')
-        selected=select_snapshot_row(self._snapshot_rows(),snapshot_date)
+        engine=getattr(self,'database_engine','mysql')
+        selected=select_snapshot_row(self._snapshot_rows(),snapshot_date,engine=engine)
         row=self.page.locator('.backups-page__row').nth(selected['index'])
         self.ui_step='OPEN_SNAPSHOT_MENU'
         self._one(row.get_by_role('button')).click()
         self.ui_step='WAIT_SNAPSHOT_MENU'
-        restore=self._one(self.page.get_by_role('button',name='Восстановить базу MySQL',exact=True))
+        restore=self._one(self.page.get_by_role('button',name='Восстановить базу '+ENGINE_LABELS[engine],exact=True))
         self.ui_step='OPEN_DB_EXPORT_FORM'
         restore.click()  # Observed UI: opens a form; this does not submit a restore/export.
         self.ui_step='VERIFY_EXPORT_DESTINATION'
@@ -235,11 +240,15 @@ class JinoPanelBrowser:
         variables=request.get('variables',{})
         if variables.get('accountId')!=self.container_id:
             raise BackupError('PROFILE_UNVERIFIED')
-        dbs=unpack_json(data.get('data',{}).get('me',{}).get('legacy',{}).get('getBackupMySQLDatabases'))
+        field='getBackupPostgreSQLDatabases' if engine=='postgresql' else 'getBackupMySQLDatabases'
+        dbs=unpack_json(data.get('data',{}).get('me',{}).get('legacy',{}).get(field))
         names=dbs if isinstance(dbs,list) else dbs.get('dbs') if isinstance(dbs,dict) else None
         if not isinstance(names,list) or not names or not all(isinstance(x,str) and x for x in names):
             raise BackupError('DATABASE_SCOPE_UNVERIFIED')
-        return {'snapshot_date':snapshot_date,'snapshot_ref':identity('snapshot',self.container_id,variables.get('date'),variables.get('serverId')),
+        snapshot_ref=identity('snapshot',self.container_id,variables.get('date'),variables.get('serverId'))
+        if engine!='mysql':snapshot_ref=identity('snapshot',self.container_id,engine,variables.get('date'),variables.get('serverId'))
+        return {'snapshot_date':snapshot_date,'snapshot_ref':snapshot_ref,
+                **({'database_engine':engine} if engine!='mysql' else {}),
                 'container_ref':identity('container',self.container_id),'container_id':self.container_id,
                 'backup_name':variables.get('date'),'backup_server_id':variables.get('serverId'),
                 'databases':names,'export_dir':destination,'binding_verified':True,'transport':'https_panel'}
@@ -356,7 +365,7 @@ class JinoPanelBrowser:
         if variables.get('objectId')!=scope['container_id'] or variables.get('serviceName')!='hosting':
             raise BackupError('PROFILE_UNVERIFIED')
         self.listing_payload=payload
-        self.owned_paths=set()
+        self.owned_paths=getattr(self,'owned_paths',set())
         self.baselines={}
         # Only this observed token operation is permitted in the API client.
         response=self._graphql(TOKEN_QUERY,{'serviceName':'hosting','objectId':scope['container_id']})
@@ -393,6 +402,12 @@ class JinoPanelBrowser:
         self.page.wait_for_load_state('networkidle',timeout=15000)
         self.page.locator('.backups-page__row').first.wait_for(state='visible',timeout=15000)
         return latest_mysql_snapshot(self._snapshot_rows())
+
+    def database_snapshots(self):
+        from .panel_downloads import latest_database_snapshot
+        self.latest_mysql_snapshot()  # Opens the observed backups page, without submitting anything.
+        rows=self._snapshot_rows()
+        return {engine:value for engine in ENGINE_LABELS if (value:=latest_database_snapshot(rows,engine))}
 
     def _graphql(self,query,variables):
         parsed=urlsplit(self.file_listing_request.url)
@@ -437,7 +452,7 @@ class JinoPanelBrowser:
         return self._list(directory) if directory is not None else []
 
     def restore_job(self,entries):
-        self.owned_paths={x['remote']['path'] for x in entries.values() if x.get('remote')}
+        self.owned_paths=getattr(self,'owned_paths',set())|{x['remote']['path'] for x in entries.values() if x.get('remote')}
         self.baselines={x['name']:x['baseline'] for x in entries.values() if 'baseline' in x}
 
     def capture_baseline(self,scope,name):
@@ -529,7 +544,7 @@ class JinoPanelBrowser:
                 payload=request.post_data_json
                 query=payload.get('query','') if isinstance(payload,dict) else ''
                 if re.search(r'\bmutation\b',query):
-                    if accepted or not export_payload_allowed(payload,expected):
+                    if accepted or not export_payload_allowed(payload,expected,engine=scope.get('database_engine','mysql')):
                         rejected.append(True)
                         route.abort()
                         return

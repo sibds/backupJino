@@ -130,6 +130,7 @@ def parser():
     panel.add_argument('--destination',type=Path,required=True)
     panel.add_argument('--idempotency-key',required=True)
     panel.add_argument('--reuse-snapshot',required=True)
+    panel.add_argument('--database-engine',choices=['mysql','postgresql'],default='mysql')
     flags = panel.add_mutually_exclusive_group()
     flags.add_argument('--execute',action='store_true')
     flags.add_argument('--dry-run',action='store_true')
@@ -300,7 +301,7 @@ def execute(args):
         selected = select_panel_source(args.file,mapping,args.source_row)
         if not args.execute:
             emit({'dry_run':True,'source_row':selected.source_row,'account_ref':selected.account_ref,
-                  'snapshot_date':args.reuse_snapshot,'snapshot_action':'REUSE_ONLY'})
+                  'snapshot_date':args.reuse_snapshot,'snapshot_action':'REUSE_ONLY','database_engine':args.database_engine})
             return 0
         if not (args.inspect_only or args.preflight_only) and not args.plaintext:
             raise BackupError('PLAINTEXT_ACKNOWLEDGEMENT_REQUIRED')
@@ -311,13 +312,14 @@ def execute(args):
         def factory():
             return JinoPanelBrowser(repo.credentials(selected.account_ref),channel=args.browser_channel,
                                     timeout_seconds=args.timeout_seconds,
+                                    database_engine=args.database_engine,
                                     research_dir=settings.state_dir/'panel-research' if args.inspect_contract else None)
         def notify(event):
             print(json.dumps(event,ensure_ascii=True),flush=True)
         result = PanelExportJob(args.state_dir,args.destination,selected.account_ref,args.idempotency_key,
                                 args.reuse_snapshot,settings.read_key(),factory,
                                 timeout_seconds=args.timeout_seconds,max_bytes=args.max_bytes,notify=notify,
-                                server_folder=selected.folder_name).run(args.inspect_only,args.preflight_only)
+                                server_folder=selected.folder_name,database_engine=args.database_engine).run(args.inspect_only,args.preflight_only)
         emit(result)
         return 0 if result.get('inspection_ok') or result.get('transport_verified') else result_code(result)
     if args.command == 'backup' and args.action == 'download-servers':

@@ -294,123 +294,181 @@ class OperatorRunner:
                 ).run()
                 self._file_totals(output, progress)
                 return result
-            progress(stage="SELECT_SNAPSHOT")
-            snapshot = task.get("snapshot_date") or panel.latest_mysql_snapshot()
-            if not snapshot:
-                raise BackupError("SNAPSHOT_NOT_FOUND")
-            progress(stage="DATABASES", snapshot_date=snapshot)
-            key = Settings.load(self.data.state_dir).read_key()
-            scope = panel.inspect(snapshot)
-            if not scope.get('binding_verified') or scope.get('snapshot_date') != snapshot:
+            return self._databases(panel,server,task,control,progress)
+
+    def _databases(self,panel,server,task,control,progress):
+        from .db_engines import database_alias
+        snapshots=panel.database_snapshots() if hasattr(panel,'database_snapshots') else {'mysql':panel.latest_mysql_snapshot()}
+        snapshots={engine:date for engine,date in snapshots.items() if date}
+        if not snapshots:raise BackupError('SNAPSHOT_NOT_FOUND')
+        scopes=[]
+        selected=task.get('db_aliases')
+        available=set()
+        for engine,date in snapshots.items():
+            if control:control.checkpoint()
+            panel.database_engine=engine
+            date=(task.get('database_snapshots') or {}).get(engine) or (task.get('snapshot_date') if engine=='mysql' or len(snapshots)==1 else None) or date
+            scope=panel.inspect(date)
+            if not scope.get('binding_verified') or scope.get('snapshot_date')!=date or scope.get('database_engine','mysql')!=engine:
                 raise BackupError('PROFILE_UNVERIFIED')
-            inventory = getattr(self.data, 'database_inventory', None)
-            if inventory:
-                inventory.discover(server['row'], server['binding_revision'], server['account_ref'], scope['databases'], snapshot=snapshot)
-            selected = task.get('db_aliases')
-            names = {identity('db', server['account_ref'], name):name for name in scope['databases']}
-            if selected is not None and not set(selected) <= names.keys():
-                raise BackupError('DATABASE_SCOPE_UNVERIFIED')
-            selected_scope = dict(scope, databases=[name for alias,name in names.items() if selected is None or alias in selected])
-            existing_exports=None
-            def reconcile_exports(active_panel,export_scope,entries):
-                if entries:inventory.remember_exports(server['row'],server['binding_revision'],snapshot,entries)
-                candidates=active_panel.export_candidates(export_scope)
-                candidates=inventory.reconcile_exports(server['row'],server['binding_revision'],snapshot,candidates)
-                for candidate in candidates:
-                    name=candidate.get('database_name')
-                    alias=identity('db',server['account_ref'],name) if name else None
-                    candidate['db_alias']=alias
-                    candidate['supported']=bool(alias and candidate.get('selectable',True) and (selected is None or alias in selected))
-                inventory.save_export_candidates(server['row'],server['binding_revision'],task['id'],candidates)
-                return len(candidates)
-            if task.get('export_handling')=='inspect':
-                count=reconcile_exports(panel,scope,{})
-                return {'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':count,'inventory_reconciled':True}
-            if task.get('export_handling')=='selected':
-                decisions=task.get('export_decisions',{})
-                existing_exports={candidate['db_alias']:{**candidate,'decision':decisions[candidate['id']]}
-                    for candidate in inventory.export_candidates(server['row'],server['binding_revision'],task['id'])
-                    if candidate['id'] in decisions and candidate.get('supported')}
-            if task.get('inspect_only'):
-                return {'status':'INSPECTED', 'snapshot_databases_count':len(names), 'source_snapshot_date':snapshot}
-            control.checkpoint()
-            progress(expected_count=len(selected_scope["databases"]), verified_count=0)
+            aliases={database_alias(server['account_ref'],name,engine) for name in scope['databases']}
+            available.update(aliases)
+            scopes.append((engine,scope,aliases))
+        if selected is not None and (not selected or not set(selected)<=available):
+            raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+        total=sum(len(aliases if selected is None else aliases&set(selected)) for _,_,aliases in scopes)
+        progress(expected_count=total)
+        results=[];verified=0;received=0
+        for engine,scope,aliases in scopes:
+            if control:control.checkpoint()
+            subset=None if selected is None else sorted(set(selected)&aliases)
+            if subset==[]:continue
+            panel.database_engine=engine
+            progress(database_snapshots={engine:scope['snapshot_date']})
+            def report(**values):
+                values.pop('expected_count',None)
+                if 'verified_count' in values:values['verified_count']+=verified
+                if 'received_bytes' in values:values['received_bytes']+=received
+                progress(**values)
             try:
-                reused = None if task.get('db_redownload_count') or task.get('db_repair_job_id') or existing_exports is not None else completed_database_copy(
-                    self.data.state_dir,
-                    self.data.destination,
-                    server["account_ref"],
-                    server["folder"],
-                    selected_scope,
-                    key,
-                    allow_subset=selected is not None,
-                )
+                result=self._database_engine(panel,server,{**task,'db_aliases':subset},control,report,scope)
             except BackupError as error:
-                if error.code=='DB_INTEGRITY_FAILED' and error.details.get('repair_job_id'):
-                    progress(db_repair_job_id=error.details['repair_job_id'])
-                raise
-            if reused:
-                progress(
-                    verified_count=reused["databases_count"],
-                    received_bytes=sum(item["size_bytes"] for item in reused["artifacts"]),
-                )
-                return reused
-            workflow_key = task.get("workflow_key") or task["id"]
-            if selected is None and not task.get("workflow_key") and self._legacy_binding(server):
-                previous_key = self.data.batch_id + "-" + snapshot
-                journal = (
-                    self.data.state_dir
-                    / "panel_jobs"
-                    / (identity("panel-job", server["account_ref"], previous_key) + ".enc")
-                )
-                if journal.exists():
-                    workflow_key = previous_key
-            progress(workflow_key=workflow_key)
-            verified = 0
-            received = 0
-            sql_warnings = {}
+                if error.code not in {'DB_INTEGRITY_FAILED','EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_INTERRUPTED','PANEL_ACCOUNT_BUSY','REMOTE_DESTINATION_EXISTS'}:
+                    raise
+                result={'status':'FAILED','error_code':error.code,'source_snapshot_date':scope['snapshot_date']}
+            result={**result,'database_engine':engine}
+            results.append(result)
+            verified+=result.get('databases_count',0)
+            received+=sum(item.get('size_bytes',0) for item in result.get('artifacts',[]))
+        if len(results)==1:return results[0]
+        failures=[result for result in results if result['status'] not in {'DB_ONLY','INSPECTED'}]
+        dates={result.get('source_snapshot_date') for result in results}
+        return {'status':failures[0]['status'] if failures else ('INSPECTED' if task.get('inspect_only') else 'DB_ONLY'),
+                **({'error_code':failures[0]['error_code']} if failures else {}),
+                'databases_count':verified,'artifacts':[item for result in results for item in result.get('artifacts',[])],
+                'engine_results':results,'source_snapshot_date':next(iter(dates)) if len(dates)==1 else None,
+                'capture_consistency':'BEST_EFFORT','application_restore_tested':False,'files_included':False}
 
-            def notify(event):
-                nonlocal verified, received
-                if event['stage']=='SQL_WARNING':
-                    sql_warnings.setdefault(event['db_alias'],[]).append(event['warning_code'])
-                if event["stage"] == "SQL_VERIFIED":
-                    verified += 1
-                    received += event["size_bytes"]
-                    if inventory:
-                        inventory.verified(server['row'], server['binding_revision'], event['db_alias'],
-                                           None if event.get('source_snapshot_verified') is False else snapshot, event['time'], event['size_bytes'],
-                                           warnings=sql_warnings.get(event['db_alias']))
-                progress(stage=event["stage"], verified_count=verified, received_bytes=received,
-                         **({'warning_code':event['warning_code']} if event.get('warning_code') else {}))
-
-            panel.download_progress = lambda amount, total: progress(
-                received_bytes=received + amount,
-                current_bytes=amount,
-                current_size=total,
-                current_file="SQL-дамп",
-            )
-
-            from .account_batch import BorrowedPanel
-
-            return PanelExportJob(
+    def _database_engine(self,panel,server,task,control,progress,scope):
+        from .db_engines import database_alias
+        engine=scope.get("database_engine","mysql")
+        snapshot=scope["snapshot_date"]
+        progress(stage="DATABASES", **({"snapshot_date":snapshot} if engine=="mysql" else {}))
+        key=Settings.load(self.data.state_dir).read_key()
+        inventory = getattr(self.data, 'database_inventory', None)
+        if inventory:
+            inventory.discover(server['row'], server['binding_revision'], server['account_ref'], scope['databases'], snapshot=snapshot,engine=engine)
+        selected = task.get('db_aliases')
+        names = {database_alias(server['account_ref'],name,engine):name for name in scope['databases']}
+        if selected is not None and not set(selected) <= names.keys():
+            raise BackupError('DATABASE_SCOPE_UNVERIFIED')
+        selected_scope = dict(scope, databases=[name for alias,name in names.items() if selected is None or alias in selected])
+        existing_exports=None
+        def reconcile_exports(active_panel,export_scope,entries):
+            if entries:inventory.remember_exports(server['row'],server['binding_revision'],snapshot,entries)
+            candidates=active_panel.export_candidates(export_scope)
+            candidates=inventory.reconcile_exports(server['row'],server['binding_revision'],snapshot,candidates)
+            for candidate in candidates:
+                name=candidate.get('database_name')
+                alias=database_alias(server['account_ref'],name,engine) if name else None
+                candidate['db_alias']=alias
+                candidate['database_engine']=engine
+                candidate['supported']=bool(alias and candidate.get('selectable',True) and (selected is None or alias in selected))
+            other=[candidate for candidate in inventory.export_candidates(server['row'],server['binding_revision'],task['id'])
+                   if candidate.get('database_engine','mysql')!=engine]
+            inventory.save_export_candidates(server['row'],server['binding_revision'],task['id'],other+candidates)
+            return len(candidates)
+        if task.get('export_handling')=='inspect':
+            count=reconcile_exports(panel,scope,{})
+            return {'status':'NEEDS_ACTION','error_code':'REMOTE_DESTINATION_EXISTS','candidates_count':count,'inventory_reconciled':True}
+        if task.get('export_handling')=='selected':
+            decisions=task.get('export_decisions',{})
+            existing_exports={candidate['db_alias']:{**candidate,'decision':decisions[candidate['id']]}
+                for candidate in inventory.export_candidates(server['row'],server['binding_revision'],task['id'])
+                if candidate['id'] in decisions and candidate.get('supported') and candidate.get('database_engine','mysql')==engine}
+        if task.get('inspect_only'):
+            return {'status':'INSPECTED', 'snapshot_databases_count':len(names), 'source_snapshot_date':snapshot}
+        control.checkpoint()
+        progress(expected_count=len(selected_scope["databases"]), verified_count=0)
+        try:
+            reused = None if task.get('db_redownload_count') or ((task.get('db_repair_job_ids') or {}).get(engine) or (task.get('db_repair_job_id') if engine=='mysql' else None)) or existing_exports is not None else completed_database_copy(
                 self.data.state_dir,
                 self.data.destination,
                 server["account_ref"],
-                workflow_key,
-                snapshot,
+                server["folder"],
+                selected_scope,
                 key,
-                lambda: BorrowedPanel(panel, scope),
-                server_folder=server["folder"],
-                notify=notify,
-                control=control.checkpoint,
-                selected_aliases=selected,
-                resume_job_id=task.get('db_repair_job_id'),
-                existing_exports=existing_exports,
-                defer_export_conflicts=True,
-                inventory_callback=lambda entries,date:inventory.remember_exports(server['row'],server['binding_revision'],date,entries),
-                collision_callback=reconcile_exports,
-            ).run()
+                allow_subset=selected is not None,
+                on_reuse=lambda entries:panel.restore_job(entries) if hasattr(panel,'restore_job') else None,
+            )
+        except BackupError as error:
+            if error.code=='DB_INTEGRITY_FAILED' and error.details.get('repair_job_id'):
+                progress(db_repair_job_id=error.details['repair_job_id'],db_repair_engine=engine)
+            raise
+        if reused:
+            progress(
+                verified_count=reused["databases_count"],
+                received_bytes=sum(item["size_bytes"] for item in reused["artifacts"]),
+            )
+            return reused
+        workflow_key = (task.get("workflow_key") or task["id"]) if engine=="mysql" else task["id"]+"-postgresql"
+        if engine=="mysql" and selected is None and not task.get("workflow_key") and self._legacy_binding(server):
+            previous_key = self.data.batch_id + "-" + snapshot
+            journal = (
+                self.data.state_dir
+                / "panel_jobs"
+                / (identity("panel-job", server["account_ref"], previous_key) + ".enc")
+            )
+            if journal.exists():
+                workflow_key = previous_key
+
+        if engine=="mysql":progress(workflow_key=workflow_key)
+        verified = 0
+        received = 0
+        sql_warnings = {}
+
+        def notify(event):
+            nonlocal verified, received
+            if event['stage']=='SQL_WARNING':
+                sql_warnings.setdefault(event['db_alias'],[]).append(event['warning_code'])
+            if event["stage"] == "SQL_VERIFIED":
+                verified += 1
+                received += event["size_bytes"]
+                if inventory:
+                    inventory.verified(server['row'], server['binding_revision'], event['db_alias'],
+                                       None if event.get('source_snapshot_verified') is False else snapshot, event['time'], event['size_bytes'],
+                                       warnings=sql_warnings.get(event['db_alias']))
+            progress(stage=event["stage"], verified_count=verified, received_bytes=received,
+                     **({'warning_code':event['warning_code']} if event.get('warning_code') else {}))
+
+        panel.download_progress = lambda amount, total: progress(
+            received_bytes=received + amount,
+            current_bytes=amount,
+            current_size=total,
+            current_file="SQL-дамп",
+        )
+
+        from .account_batch import BorrowedPanel
+
+        return PanelExportJob(
+            self.data.state_dir,
+            self.data.destination,
+            server["account_ref"],
+            workflow_key,
+            snapshot,
+            key,
+            lambda: BorrowedPanel(panel, scope),
+            server_folder=server["folder"],
+            notify=notify,
+            control=control.checkpoint,
+            selected_aliases=selected,
+            resume_job_id=((task.get('db_repair_job_ids') or {}).get(engine) or (task.get('db_repair_job_id') if engine=='mysql' else None)),
+            existing_exports=existing_exports,
+            defer_export_conflicts=True,
+            inventory_callback=lambda entries,date:inventory.remember_exports(server['row'],server['binding_revision'],date,entries),
+            collision_callback=reconcile_exports,
+            database_engine=engine,
+        ).run()
 
     @staticmethod
     def _legacy_binding(server):

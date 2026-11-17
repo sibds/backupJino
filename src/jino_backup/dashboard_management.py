@@ -555,6 +555,7 @@ class DashboardManagement:
                     candidate=candidates[item['candidate_id']]
                     alias=candidate.get('db_alias') or item.get('db_alias')
                     if (alias not in allowed or alias in aliases or not isinstance(candidate.get('name'),str)
+                            or known.get(alias,{}).get('engine','mysql')!=candidate.get('database_engine','mysql')
                             or not candidate['name'].endswith('.sql') or candidate.get('selectable') is False
                             or candidate.get('kind','file')!='file' or candidate.get('listing_error')):
                         raise BackupError('REQUEST_INVALID')
@@ -1063,7 +1064,16 @@ class DashboardManagement:
             import re
             repair=values.get('db_repair_job_id')
             if isinstance(repair,str) and re.fullmatch('panel-job-[a-f0-9]{24}',repair):
-                self._update(task_id,db_repair_job_id=repair)
+                engine=values.get('db_repair_engine','mysql')
+                if engine not in {'mysql','postgresql'}:raise BackupError('DATABASE_ENGINE_UNSUPPORTED')
+                repairs={**task.get('db_repair_job_ids',{}),engine:repair}
+                self._update(task_id,db_repair_job_ids=repairs,**({'db_repair_job_id':repair} if engine=='mysql' else {}))
+            snapshots=values.get('database_snapshots')
+            if isinstance(snapshots,dict):
+                for engine,value in snapshots.items():
+                    if engine not in {'mysql','postgresql'} or date.fromisoformat(value).isoformat()!=value:
+                        raise BackupError('SNAPSHOT_DATE_INVALID')
+                self._update(task_id,database_snapshots={**task.get('database_snapshots',{}),**snapshots})
             progress = dict(task["progress"])
             for key in (
                 'metadata_mlst_checks',
