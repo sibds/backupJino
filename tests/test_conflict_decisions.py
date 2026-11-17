@@ -25,3 +25,12 @@ def test_conflict_decision_rejects_non_file_tasks_and_unknown_actions(management
     task=management.start(1,'databases',{})
     with pytest.raises(BackupError):
         management.resolve_conflict(task['id'],{'conflict_id':'a'*64,'decision':'keep_both'})
+
+
+def test_session_rule_is_saved_only_for_validated_file_and_task(management):
+    management._schedule=lambda:None
+    task=management.start(1,'files',{})
+    conflict={'id':'a'*64,'rule_id':'b'*64,'remote_path':'log.txt','local_path':'log.txt','reason':'LOCAL_CONTENT_DIFFERS'}
+    management.progress(task['id'],{'stage':'FILE_CONFLICT','log':True,'error_code':'FILE_CONFLICT_PENDING','conflict':conflict})
+    management.resolve_conflict(task['id'],{'conflict_id':'a'*64,'decision':'new_version','apply_to_session':True})
+    assert management.task(task['id'])['conflict_decisions']['b'*64]=='new_version'

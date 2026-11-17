@@ -228,7 +228,7 @@ function operatorDecisionRequests(servers) {
       && !['CANCELLED','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT'].includes(task.operator_request.code)
       && (task.operator_request.actions?.length || task.operator_request.code==='FILE_CONFLICT_PENDING')
       && (task.operator_request.code!=='FILE_CONFLICT_PENDING' || !Array.isArray(server.conflict_events)
-        || server.conflict_events.some(event=>event.task_id===task.id && event.conflict?.id && !task.conflict_decisions?.[event.conflict.id]))
+        || server.conflict_events.some(event=>event.task_id===task.id && event.conflict?.id && event.error_code!=='FILE_CONFLICT_SKIPPED' && !task.conflict_decisions?.[event.conflict.id] && !task.conflict_decisions?.[event.conflict.rule_id]))
       && (!server.latest_tasks?.[task.kind] || server.latest_tasks[task.kind].id===task.id)).map(task=>({server,task})));
 }
 

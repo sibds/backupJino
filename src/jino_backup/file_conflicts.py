@@ -93,7 +93,10 @@ def reconcile(checkpoint, source, remote, entry, deadline, *, peer=None):
         key = conflict_key(checkpoint.scope, remote, peer + '\0' + local_hash + '\0' + remote_hash
                            + '\0' + str(entry.modified))
         details['id'] = key
-        decision = checkpoint.conflict_decision(key)
+        rule_id = conflict_key(checkpoint.scope, remote, peer + '\0session-file') if peer == remote else None
+        if rule_id:
+            details['rule_id'] = rule_id
+        decision = checkpoint.conflict_decision(key) or (checkpoint.conflict_decision(rule_id) if rule_id else None)
         if remote_hash == local_hash:
             if peer == remote:
                 checkpoint.record(remote, entry, 'done', entry.size, remote_hash)

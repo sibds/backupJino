@@ -914,7 +914,7 @@
   function renderFileConflicts(fragment, task) {
     if (!task) return;
     const seen=new Set();
-    const events=(detail?.conflict_events || []).filter(e=>e.task_id===task.id && e.conflict?.id);
+    const events=(detail?.conflict_events || []).filter(e=>e.task_id===task.id && e.conflict?.id && e.error_code!=='FILE_CONFLICT_SKIPPED' && !task.conflict_decisions?.[e.conflict.id] && !task.conflict_decisions?.[e.conflict.rule_id]);
     if (!events.length) return;
     const section=node('section','file-conflicts');
     const unresolved=events.some(event=>!task.conflict_decisions?.[event.conflict.id]);
@@ -936,7 +936,14 @@
       if (decision) card.append(node('p','notice','Решение сохранено: '+({keep_both:'сохранить оба',new_version:'новая папка версии',use_remote:'обновить существующую копию',keep_local:'оставить локальную'}[decision])+(['PAUSED','PAUSING','STOPPED','STOPPING'].includes(task.state)?'. Применится при продолжении задания.':'. Применится автоматически.')));
       else {
         const actions=node('div','job-controls');
-        const choose=value=>command('/api/tasks/'+task.id+'/conflict',{conflict_id:item.id,decision:value});
+        const remember=node('input','');
+        remember.type='checkbox'; remember.disabled=pending;
+        if (item.rule_id && item.reason==='LOCAL_CONTENT_DIFFERS') {
+          const label=node('label','helper');
+          label.append(remember,document.createTextNode(' Применять к следующим изменениям этого файла в текущем задании'));
+          card.append(label);
+        }
+        const choose=value=>command('/api/tasks/'+task.id+'/conflict',{conflict_id:item.id,decision:value,apply_to_session:remember.checked});
         if (item.reason==='LOCAL_CONTENT_DIFFERS' || item.reason==='CASE_COLLISION') actions.append(actionButton('Новая папка версии',()=>choose('new_version'),pending));
         else actions.append(actionButton('Сохранить оба',()=>choose('keep_both'),pending));
         if (item.reason==='LOCAL_CONTENT_DIFFERS') actions.append(actionButton('Обновить существующую',()=>choose('use_remote'),pending));

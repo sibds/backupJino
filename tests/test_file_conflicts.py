@@ -35,6 +35,24 @@ def test_identical_untracked_local_file_is_verified_and_adopted(tmp_path):
         assert cp.db.execute("SELECT state FROM files").fetchone()[0]=='done'
 
 
+def test_session_file_rule_handles_successive_changes_without_affecting_other_files(tmp_path):
+    source=MemorySource({'one.txt':(b'old','20261113100000'),'other.txt':(b'old','20261113100000')})
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as cp:
+        cp.resolve_conflicts=True; cp.ask_source_changes=True
+        fetch(cp,source,'one.txt'); fetch(cp,source,'other.txt')
+        source.files['one.txt']=(b'changed','20261114100000')
+        with pytest.raises(BackupError) as caught: fetch(cp,source,'one.txt')
+        rule=caught.value.details['conflict']['rule_id']
+        cp.conflict_decision=lambda key:'new_version' if key==rule else None
+        fetch(cp,source,'one.txt')
+        source.files['one.txt']=(b'changed again','20261115100000')
+        fetch(cp,source,'one.txt')
+        assert cp.file_path('one.txt').read_bytes()==b'changed again'
+        assert (cp.root/'files/one.txt').read_bytes()==b'old'
+        source.files['other.txt']=(b'changed','20261115100000')
+        with pytest.raises(BackupError,match='FILE_CONFLICT_PENDING'): fetch(cp,source,'other.txt')
+
+
 def test_newer_remote_updates_owned_file_and_preserves_old_bytes(tmp_path):
     source=MemorySource({'one.txt':(b'old', '20261113100000')})
     with DirectoryCheckpoint(tmp_path/'copy', 'scope') as cp:

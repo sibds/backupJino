@@ -37,3 +37,9 @@ test('internal cancellation is handled automatically without asking for retry',(
   assert.equal(context.operatorDecisionRequests([{row:1,tasks:[cancelled]}]).length,0);
  }
 });
+
+test('session file rule hides subsequent versions from decision notifications',()=>{
+ const conflict={...task,kind:'files',conflict_decisions:{rule:'new_version'},operator_request:{code:'FILE_CONFLICT_PENDING',actions:[]}};
+ const server={row:10,tasks:[conflict],conflict_events:[{task_id:task.id,conflict:{id:'next',rule_id:'rule'}}]};
+ assert.equal(context.operatorDecisionRequests([server]).length,0);
+});
