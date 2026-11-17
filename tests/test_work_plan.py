@@ -10,6 +10,20 @@ def recurring(management, files=True, databases=False):
         'scheduled_at':'2030-01-01T00:00:00+00:00','request_id':'first-copy-request-123'})
 
 
+def test_rules_resolve_servers_from_one_catalog_snapshot(management, monkeypatch):
+    recurring(management, databases=True)
+    calls=[]
+    original=management.catalog.all
+    def counted(**kwargs):
+        calls.append(1)
+        return original(**kwargs)
+    monkeypatch.setattr(management.catalog, 'all', counted)
+    rules=management.work_plans.list()
+    assert len(rules)==2
+    assert all(not r['stale'] and not r['blocked'] for r in rules)
+    assert len(calls)==1
+
+
 def test_recurring_partial_copy_keeps_original_key(management):
     recurring(management)
     management.work_plans.tick(now=1893456001)

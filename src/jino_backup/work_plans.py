@@ -34,8 +34,13 @@ class WorkPlans:
     def list(self):
         with self.management.catalog.connection() as db:
             rules=[json.loads(row[0]) for row in db.execute('SELECT payload FROM work_rules ORDER BY id')]
+        if not rules:
+            return rules
+        servers={server['row']:server for server in self.management.catalog.all(include_deleted=True)}
         for rule in rules:
-            server=self.management.catalog.get(rule['row'],include_deleted=True)
+            server=servers.get(rule['row'])
+            if server is None:
+                raise BackupError('SERVER_NOT_FOUND')
             rule.update(server_name=server['name'],server_login=server['login'],
                         stale=server['binding_revision']!=rule['revision'],blocked=server['blocked'] or server['deleted'])
         return rules
