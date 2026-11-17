@@ -81,6 +81,7 @@ class DashboardCatalog:
             duplicate = bool(config["panel_login"]) and any(
                 other["row"] != config["row"]
                 and not other["deleted"]
+                and not other["blocked"]
                 and other["panel_login"] == config["panel_login"]
                 for other in records
             )
@@ -105,6 +106,7 @@ class DashboardCatalog:
             ftp_duplicate = bool(config["ftp_login"]) and any(
                 other["row"] != config["row"]
                 and not other["deleted"]
+                and not other["blocked"]
                 and (other["ftp_host"], other["ftp_login"])
                 == (config["ftp_host"], config["ftp_login"])
                 for other in records
