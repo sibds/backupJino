@@ -144,6 +144,88 @@ def management(tmp_path):
     service.close()
 
 
+def test_worker_exit_before_runner_is_retried_with_same_identity(management, monkeypatch):
+    def broken_worker(task_id):
+        raise RuntimeError('synthetic private exception text')
+    monkeypatch.setattr(management, '_run', broken_worker)
+    task = management.start(1, 'files', {'scheduled_at':'2099-01-01T00:00:00Z'})
+    management._update(task['id'], workflow_key='synthetic-preserved-key')
+    management.change(task['id'], 'schedule', {'scheduled_at':None})
+    wait_status(management, task['id'], 'SCHEDULED')
+    recovered = management.task(task['id'])
+    assert recovered['workflow_key'] == 'synthetic-preserved-key'
+    assert recovered['auto_resume_error'] == 'WORKER_RESTARTED'
+    assert task['id'] not in management.running
+    with management.catalog.connection() as db:
+        events = [json.loads(r[0]) for r in db.execute('SELECT payload FROM events')]
+    exits = [e for e in events if e['stage'] == 'WORKER_EXITED']
+    assert exits and exits[-1]['exception_type'] == 'RuntimeError'
+    assert 'synthetic private exception text' not in json.dumps(events)
+
+
+def test_submit_failure_does_not_leave_running_task(management, monkeypatch):
+    def reject(*args, **kwargs):
+        raise RuntimeError('executor unavailable')
+    monkeypatch.setattr(management.executor, 'submit', reject)
+    task = management.start(1, 'files', {})
+    assert management.task(task['id'])['state'] == 'SCHEDULED'
+    assert task['id'] not in management.running
+
+
+def test_supervision_does_not_restart_a_live_worker(management):
+    entered, release = threading.Event(), threading.Event()
+    def runner(server, task, control, progress):
+        entered.set()
+        release.wait(5)
+        return {'status': 'FILES_ONLY'}
+    management.runner = runner
+    try:
+        task = management.start(1, 'files', {})
+        assert entered.wait(2)
+        with management.lock:
+            management._schedule()
+        assert management.task(task['id'])['state'] == 'RUNNING'
+        assert len(management.tasks()) == 1
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize('state,expected', [('PAUSING','PAUSED'), ('STOPPING','STOPPED')])
+def test_completed_worker_supervision_preserves_manual_control(management, state, expected):
+    from concurrent.futures import Future
+    task = management.start(1, 'files', {'scheduled_at':'2099-01-01T00:00:00Z'})
+    management._update(task['id'], state=state)
+    future = Future()
+    future.set_exception(RuntimeError('synthetic exit'))
+    management.futures[task['id']] = future
+    management.running.add(task['id'])
+    with management.lock:
+        management._reap_workers()
+    assert management.task(task['id'])['state'] == expected
+    assert task['id'] not in management.running
+
+
+def test_worker_recovery_retries_after_persistence_failure(management, monkeypatch):
+    from concurrent.futures import Future
+    task = management.start(1, 'files', {'scheduled_at':'2099-01-01T00:00:00Z'})
+    management._update(task['id'], state='RUNNING', first_started_at='2026-11-18T00:00:00Z')
+    future = Future()
+    future.set_exception(KeyError('synthetic'))
+    management.futures[task['id']] = future
+    management.running.add(task['id'])
+    original = management.event
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('synthetic persistence outage')
+    monkeypatch.setattr(management, 'event', unavailable)
+    management._worker_finished(future)
+    assert task['id'] in management.futures
+    monkeypatch.setattr(management, 'event', original)
+    with management.lock:
+        management._reap_workers()
+    assert management.task(task['id'])['state'] == 'SCHEDULED'
+    assert task['id'] not in management.futures
+
+
 def test_catalog_crud_keeps_secrets_encrypted_and_original_source_unchanged(management):
     catalog = management.catalog
     before = management.data.source.read_bytes()
@@ -426,8 +508,11 @@ def test_skip_name_setting_persists_and_applies_to_retry(management, monkeypatch
     config = management.save_server(1, {"skip_unsupported_names": False})
     binding = config["binding_revision"]
     task = management.start(1, "files", {"transport": "ftps"})
-    wait_status(management, task["id"], "WAITING_OPERATOR")
-    assert management.task(task["id"])["error_code"] == "REMOTE_PATH_UNSAFE"
+    wait_status(management, task["id"], "FINISHED")
+    first=management.task(task['id'])
+    assert first['result']['status']=='PARTIAL' and not first.get('operator_request')
+    omissions=management.events(1,stage='FILE_SKIPPED')
+    assert len(omissions)==2 and all(item['error_code']=='REMOTE_PATH_UNSAFE' for item in omissions)
     config = management.save_server(1, {"skip_unsupported_names": True})
     assert config["binding_revision"] == binding
     management.action(task["id"], "resume")
@@ -637,7 +722,7 @@ def test_new_ui_file_job_reuses_partial_legacy_checkpoint(management, monkeypatc
     assert management.task(task["id"])["result"]["files_bytes"] == len(b"synthetic-content")
 
 
-def test_restart_keeps_database_tasks_interrupted_for_manual_resume(management):
+def test_restart_retries_interrupted_database_tasks_without_new_job(management):
     from jino_backup.dashboard_management import DashboardManagement
 
     management.runner = lambda server, task, control, progress: {"status": "FILES_ONLY"}
@@ -652,7 +737,8 @@ def test_restart_keeps_database_tasks_interrupted_for_manual_resume(management):
         access_policy=management.access_policy,
     )
     try:
-        assert restarted.task(task["id"])["state"] == "INTERRUPTED"
+        assert restarted.task(task["id"])["state"] == "SCHEDULED"
+        assert restarted.task(task["id"])['db_timeout_count'] == 1
         assert not calls
     finally:
         restarted.close()

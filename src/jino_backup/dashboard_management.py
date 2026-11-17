@@ -4,7 +4,7 @@ import json
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, datetime, timezone, timedelta
 
 from .dashboard_catalog import DashboardCatalog
@@ -125,6 +125,8 @@ class DashboardManagement:
         self.lock = threading.RLock()
         self.controls = {}
         self.running = set()
+        self.futures = {}
+        self.supervisor_timer = None
         self.closed = False
         self.timer = None
         self.executor = ThreadPoolExecutor(max_workers=7, thread_name_prefix="backup-operator")
@@ -170,6 +172,62 @@ class DashboardManagement:
                 if task['revision']==self.catalog.get(task['row'],include_deleted=True)['binding_revision']:
                     self._request_operator(task['id'])
             self._schedule()
+        self._arm_supervisor()
+
+    def _arm_supervisor(self):
+        if not self.closed:
+            self.supervisor_timer = threading.Timer(30, self._supervise)
+            self.supervisor_timer.daemon = True
+            self.supervisor_timer.start()
+
+    def _supervise(self):
+        try:
+            with self.lock:
+                if not self.closed:
+                    self._reap_workers()
+                    self._schedule()
+        except Exception:
+            # Keep the next health check alive even during a transient SQLite failure.
+            import logging
+            logging.getLogger(__name__).error('Worker supervision failed; retrying in 30 seconds')
+        finally:
+            self._arm_supervisor()
+
+    def _worker_finished(self, future):
+        try:
+            with self.lock:
+                if not self.closed:
+                    self._reap_workers()
+                    self._schedule()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).error('Worker completion pending supervision retry')
+
+    def _reap_workers(self):
+        for task_id, future in list(self.futures.items()):
+            if not future.done():
+                continue
+            task = self.task(task_id)
+            if task['state'] in {'RUNNING', 'PAUSING', 'STOPPING'}:
+                error = None if future.cancelled() else future.exception()
+                import traceback
+                from pathlib import Path
+                frames = traceback.extract_tb(error.__traceback__) if error else []
+                origin = frames[-1] if frames else None
+                self.event(task['row'], 'WORKER_EXITED', kind=task['kind'], task_id=task_id,
+                           code='WORKER_RESTARTED', exception_type=type(error).__name__ if error else 'UnexpectedWorkerExit',
+                           error_location=(Path(origin.filename).name+':'+str(origin.lineno)+':'+origin.name) if origin else 'unknown')
+                control = self.controls.get(task_id)
+                state = 'STOPPED' if task['state']=='STOPPING' or control and control.stopped else (
+                    'PAUSED' if task['state']=='PAUSING' or control and control.paused else 'INTERRUPTED')
+                self._update(task_id, state=state, error_code='WORKER_RESTARTED')
+            self.running.discard(task_id)
+            self._queue_file_resume(task_id)
+            self._queue_database_redownload(task_id)
+            # Remove only after persistence and recovery succeeded. A failed health
+            # check can then retry without touching a live transfer.
+            if self.futures.get(task_id) is future:
+                del self.futures[task_id]
 
     def task(self, task_id):
         with self.catalog.connection() as db:
@@ -226,10 +284,19 @@ class DashboardManagement:
         if details.get('warning_code')=='SQL_NO_OBJECTS':
             event['warning_code']='SQL_NO_OBJECTS'
             event['level']='warning'
+        if stage=='SQL_SKIPPED' and details.get('warning_code')=='REMOTE_PATH_UNSAFE':
+            event.update(warning_code='REMOTE_PATH_UNSAFE',level='warning')
         if isinstance(details.get("retry_at"), str):
             event["retry_at"] = details["retry_at"]
         if isinstance(details.get("directory"), str):
             event["directory"] = details["directory"][:2000]
+        from .unsafe_paths import UNSAFE_REASONS
+        if details.get('unsafe_reason') in UNSAFE_REASONS:event['unsafe_reason']=details['unsafe_reason']
+        if kind=='files':
+            for key in ('unsafe_path','unsafe_name','expected_name','actual_name'):
+                if isinstance(details.get(key),str):event[key]=details[key][:2000]
+        for key in ('exception_type','error_location'):
+            if isinstance(details.get(key),str):event[key]=details[key][:300]
         conflict = details.get('conflict')
         if stage in {'FILE_CONFLICT','FILE_RECONCILED'} and isinstance(conflict, dict):
             allowed = {'id','remote_path','local_path','remote_size','local_size','remote_modified',
@@ -251,9 +318,10 @@ class DashboardManagement:
         if type(details.get("progress_advanced")) is bool:
             event["progress_advanced"] = details["progress_advanced"]
         if stage == "FILE_SKIPPED":
+            event['level']='warning'
             if isinstance(details.get("skipped_path"), str):
                 event["file"] = details["skipped_path"][:2000]
-            if details.get("skip_reason") in {"WINDOWS_CHARACTERS", "TRAILING_DOT_OR_SPACE", "WINDOWS_RESERVED_NAME", "INVALID_UTF8_NAME", "SYMLINK", "FIFO", "SOCKET", "CHAR_DEVICE", "BLOCK_DEVICE"}:
+            if details.get("skip_reason") in UNSAFE_REASONS|{"SYMLINK", "FIFO", "SOCKET", "CHAR_DEVICE", "BLOCK_DEVICE"}:
                 event["skip_reason"] = details["skip_reason"]
             if details.get("skipped_kind") in {"file", "dir", "special"}:
                 event["skipped_kind"] = details["skipped_kind"]
@@ -720,7 +788,13 @@ class DashboardManagement:
                 first_started_at=task.get('first_started_at') or timestamp(),
                 auto_resume_at=None, next_at=None, error_code=None
             )
-            self.executor.submit(self._run, task["id"])
+            try:
+                future = self.executor.submit(self._run, task["id"])
+            except Exception as error:
+                future = Future()
+                future.set_exception(error)
+            self.futures[task['id']] = future
+            future.add_done_callback(self._worker_finished)
         if any(x.get('schedule', {}).get('enabled') for server in self.catalog.all() if not server['deleted'] for x in self.inventory.list(server['row'], server['binding_revision'])):
             next_wake.append(time.time()+60)
         if any(rule['enabled'] and not rule['stale'] and not rule['blocked'] for rule in self.work_plans.list()):
@@ -952,6 +1026,14 @@ class DashboardManagement:
             )
             if code == "CAPTCHA_REQUIRED":
                 self.access_policy.block(task["row"])
+            import traceback
+            from pathlib import Path
+            frames=traceback.extract_tb(error.__traceback__)
+            origin=frames[-1] if frames else None
+            location=(Path(origin.filename).name+':'+str(origin.lineno)+':'+origin.name) if origin else 'unknown'
+            self.event(task['row'],'TASK_ERROR',kind=task['kind'],code=code,task_id=task_id,
+                       exception_type=type(error).__name__,error_location=location,
+                       **(error.details if isinstance(error,BackupError) else {}))
             if code=='VERIFICATION_DEFERRED' and not control.stopped:
                 deferred=True
                 self._update(task_id,state='PAUSED' if control.paused else 'QUEUED',
@@ -988,12 +1070,12 @@ class DashboardManagement:
 
     def _queue_database_redownload(self,task_id):
         task=self.task(task_id)
-        timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','CANCELLED'}
+        timed_out=task.get('error_code') in {'EXPORT_TIMEOUT','DB_EXPORT_TIMEOUT','OPERATION_TIMEOUT','TRANSFER_TIMEOUT','LOW_SPEED_TIMEOUT','CANCELLED','WORKER_RESTARTED'}
         request=task.get('operator_request') or {}
         automatic_request=(timed_out and task['state']=='WAITING_OPERATOR'
             and request.get('code')==task.get('error_code') and 'retry' in request.get('actions',[])
             and not request.get('inspection_pending'))
-        if (self.closed or task['kind']!='databases' or (task['state']!='FAILED' and not automatic_request)
+        if (self.closed or task['kind']!='databases' or (task['state'] not in {'FAILED','INTERRUPTED'} and not automatic_request)
                 or (not timed_out and task.get('error_code')!='DB_INTEGRITY_FAILED')
                 or (task.get('operator_deferred') or {}).get('blocking')): return False
         control=self.controls.get(task_id)
@@ -1135,7 +1217,8 @@ class DashboardManagement:
                     **progress,
                     **{key: values[key] for key in ("skipped_path", "skip_reason", "skipped_kind") if key in values},
                     **{key: values[key] for key in ("directory", "operation", "ftp_reply_code",
-                       "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code') if key in values},
+                       "curl_error_code", "curl_error_kind", "progress_advanced",'conflict','action','warning_code',
+                       'unsafe_reason','unsafe_path','unsafe_name','expected_name','actual_name') if key in values},
                 )
             if values.get('stage')=='FILE_CONFLICT' and values.get('error_code')=='FILE_CONFLICT_PENDING' and not task.get('operator_request') and not task.get('operator_deferred'):
                 self._update(task_id,operator_request={'id':uuid.uuid4().hex,'code':'FILE_CONFLICT_PENDING',
@@ -1147,6 +1230,8 @@ class DashboardManagement:
             self.closed = True
             if self.timer:
                 self.timer.cancel()
+            if self.supervisor_timer:
+                self.supervisor_timer.cancel()
             for control in self.controls.values():
                 control.request("stop")
         self.executor.shutdown(wait=True, cancel_futures=True)
