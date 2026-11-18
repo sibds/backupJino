@@ -63,6 +63,8 @@ def test_progress_updates_do_not_scan_the_checkpoint(tmp_path):
     collector.committed_file('second', 'partial', 8)
     collector.committed_file('second', 'done', 8)
     collector.committed_file('second', 'done', 8)
+    assert collector.saved_bytes == 9 and collector.saved_done == 2
+    collector.emit(force=True)
     assert events[-1]['received_bytes'] == 9 and events[-1]['verified_files'] == 2
 
 

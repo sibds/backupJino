@@ -27,6 +27,7 @@ class ConnectionBudget:
         self.waiters = 0
         self.verification_slot = threading.Semaphore(1)
         self.scan_slots=threading.Semaphore(3)
+        self.scan_waiters=deque()
         self.metadata_limit=min(3,limit)
         self.metadata_reserve=min(3,max(1,limit//3))
         self.data_limit=max(1,limit-self.metadata_reserve)
@@ -37,6 +38,25 @@ class ConnectionBudget:
     def snapshot(self):
         with self.condition:
             return {"used": self.used, "limit": self.limit}
+
+    @contextmanager
+    def scan_directory(self,control):
+        ticket=object();acquired=False
+        with self.condition:self.scan_waiters.append(ticket)
+        try:
+            while not acquired:
+                control.checkpoint()
+                with self.condition:
+                    if self.scan_waiters[0] is ticket and self.scan_slots.acquire(blocking=False):
+                        self.scan_waiters.popleft();acquired=True
+                        self.condition.notify_all()
+                    else:self.condition.wait(.05)
+            yield
+        finally:
+            with self.condition:
+                if ticket in self.scan_waiters:self.scan_waiters.remove(ticket)
+                if acquired:self.scan_slots.release()
+                self.condition.notify_all()
 
     @contextmanager
     def lease(self, control, role='general'):
@@ -270,6 +290,8 @@ class ParallelCollector:
         self.verifying = 0
         self.mutex = threading.RLock()
         self.emit_mutex = threading.RLock()
+        self.last_progress_at=float('-inf')
+        self.last_progress_phase=None
         self.failure = None
         self.download_phase_complete = False
         self.enqueued_paths = set()
@@ -309,9 +331,7 @@ class ParallelCollector:
                         self.control.checkpoint()
                         self.resume_discovered()
                     self.resume_pending()
-                    while not self.budget.scan_slots.acquire(timeout=.1):self.control.checkpoint()
-                    try:self.scan()
-                    finally:self.budget.scan_slots.release()
+                    self.scan()
                 else:
                     self.download(credentials, site, index)
             except BaseException as error:
@@ -364,7 +384,7 @@ class ParallelCollector:
             if checkpoint.retained_items():
                 result['retained_local'] = checkpoint.retained_items()
             if not self.errors:self.walk.finish()
-            self.emit(stage="FILES_DOWNLOAD", log=True)
+            self.emit(stage="FILES_DOWNLOAD", log=True, force=True)
             return result
         finally:
             checkpoint.on_commit = None
@@ -391,6 +411,15 @@ class ParallelCollector:
             self._emit(**event)
 
     def _emit(self, **event):
+        force=event.pop('force',False)
+        phase=(self.inventory_complete,getattr(self,'download_phase_complete',False))
+        routine=event.get('stage') in {None,'SCANNING','RESUMING_FILES','FILE_DOWNLOAD','FILE_VERIFY','FILES_DOWNLOAD'}
+        now=time.monotonic()
+        if (routine and not force and not event.get('error_code') and not event.get('warning_code')
+                and phase==getattr(self,'last_progress_phase',None) and now-getattr(self,'last_progress_at',float('-inf'))<.5):
+            return
+        self.last_progress_at=now
+        self.last_progress_phase=phase
         with self.mutex:
             if (event.get("stage") == "RETRY_WAIT" and not event.get('verification_retry')
                     and not event.get('metadata_retry')
@@ -506,133 +535,134 @@ class ParallelCollector:
         pending, seen = [("", 0)], {}
         while pending:
             self.control.checkpoint()
-            parent, depth = pending.pop()
-            if depth > 64:
-                raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-            self.emit(stage="SCANNING", log=True, directory=parent or "/")
-            try:
-                def listing():
-                    if parent:self.metadata.validate_parents(parent+'/.listing')
-                    return self.metadata.listdir(parent)
-                for attempt in range(3):
-                    try:
-                        entries,cached = self.walk.listing(parent,listing)
-                        break
-                    except BackupError as changed:
-                        if changed.code!='SOURCE_CHANGED' or not self.checkpoint.refresh_changed_sources:raise
-                        self.walk.invalidate_directory(parent)
-                        self.metadata.checked_parents.discard(parent)
-                        if attempt==2:raise
-                        self.emit(stage='SOURCE_REFRESH',log=True,directory=parent or '/')
-                if cached:self.cached_directories+=1
-            except BackupError as error:
-                self.emit(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
-                          error_code=error.code, **error.details)
-                if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
-                    self.skip_unsafe(parent or '/',error,'dir');continue
-                isolated = error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
-                    error.code=='SOURCE_CHANGED' and self.checkpoint.refresh_changed_sources)
-                if not parent or not self.continue_on_error or not isolated:
-                    raise
-                self.incomplete = True
-                self.errors.append({"path": parent, "kind": "dir", "error_code": error.code, **error.details})
-                continue
-            self.directories_seen += 1
-            for entry in entries:
-                self.control.checkpoint()
+            with self.budget.scan_directory(self.control):
+                parent, depth = pending.pop()
+                if depth > 64:
+                    raise BackupError("TRANSFER_LIMIT_EXCEEDED")
+                self.emit(stage="SCANNING", log=True, directory=parent or "/")
                 try:
-                    issue = name_compatibility_issue(entry.name)
-                    if issue and not self.skip_names:
-                        raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(entry.name))
-                except BackupError as error:
-                    if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
-                    self.skip_unsafe(parent+('/' if parent else '')+(entry.name if isinstance(entry.name,str) else '<invalid name>'),error,entry.kind)
-                    continue
-                path = posixpath.join(parent, entry.name)
-                try:storage_key = (path if issue else self.checkpoint.storage_path(path)).casefold()
-                except BackupError as error:
-                    if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
-                    self.skip_unsafe(path,error,entry.kind);continue
-                if storage_key in seen:
-                    peer, previous = seen[storage_key]
-                    if not self.continue_on_error:
-                        raise BackupError("REMOTE_PATH_COLLISION", path=path, other_path=peer)
-                    if entry.kind == previous.kind == 'file':
-                        self.planned_files += 1
-                        self.planned_bytes += entry.size
-                        if entry.size < 0 or self.planned_bytes > self.max_bytes:
-                            raise BackupError('TRANSFER_LIMIT_EXCEEDED')
-                        self.collisions.append((path, entry, peer))
-                        if len(self.collisions) + len(seen) > self.max_files:
-                            raise BackupError('TRANSFER_LIMIT_EXCEEDED')
-                        continue
-                    else:
-                        from .file_conflicts import directory_conflict
+                    def listing():
+                        if parent:self.metadata.validate_parents(parent+'/.listing')
+                        return self.metadata.listdir(parent)
+                    for attempt in range(3):
                         try:
-                            directory_conflict(self.checkpoint,path,entry,peer,previous)
+                            entries,cached = self.walk.listing(parent,listing)
+                            break
+                        except BackupError as changed:
+                            if changed.code!='SOURCE_CHANGED' or not self.checkpoint.refresh_changed_sources:raise
+                            self.walk.invalidate_directory(parent)
+                            self.metadata.checked_parents.discard(parent)
+                            if attempt==2:raise
+                            self.emit(stage='SOURCE_REFRESH',log=True,directory=parent or '/')
+                    if cached:self.cached_directories+=1
+                except BackupError as error:
+                    self.emit(stage="DIRECTORY_ERROR", log=True, directory=parent or "/",
+                              error_code=error.code, **error.details)
+                    if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                        self.skip_unsafe(parent or '/',error,'dir');continue
+                    isolated = error.code=='REMOTE_DIRECTORY_UNAVAILABLE' or (
+                        error.code=='SOURCE_CHANGED' and self.checkpoint.refresh_changed_sources)
+                    if not parent or not self.continue_on_error or not isolated:
+                        raise
+                    self.incomplete = True
+                    self.errors.append({"path": parent, "kind": "dir", "error_code": error.code, **error.details})
+                    continue
+                self.directories_seen += 1
+                for entry in entries:
+                    self.control.checkpoint()
+                    try:
+                        issue = name_compatibility_issue(entry.name)
+                        if issue and not self.skip_names:
+                            raise BackupError('REMOTE_PATH_UNSAFE',unsafe_reason=issue,unsafe_name=display_path(entry.name))
+                    except BackupError as error:
+                        if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                        self.skip_unsafe(parent+('/' if parent else '')+(entry.name if isinstance(entry.name,str) else '<invalid name>'),error,entry.kind)
+                        continue
+                    path = posixpath.join(parent, entry.name)
+                    try:storage_key = (path if issue else self.checkpoint.storage_path(path)).casefold()
+                    except BackupError as error:
+                        if error.code!='REMOTE_PATH_UNSAFE' or not self.continue_on_error:raise
+                        self.skip_unsafe(path,error,entry.kind);continue
+                    if storage_key in seen:
+                        peer, previous = seen[storage_key]
+                        if not self.continue_on_error:
+                            raise BackupError("REMOTE_PATH_COLLISION", path=path, other_path=peer)
+                        if entry.kind == previous.kind == 'file':
+                            self.planned_files += 1
+                            self.planned_bytes += entry.size
+                            if entry.size < 0 or self.planned_bytes > self.max_bytes:
+                                raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                            self.collisions.append((path, entry, peer))
+                            if len(self.collisions) + len(seen) > self.max_files:
+                                raise BackupError('TRANSFER_LIMIT_EXCEEDED')
+                            continue
+                        else:
+                            from .file_conflicts import directory_conflict
+                            try:
+                                directory_conflict(self.checkpoint,path,entry,peer,previous)
+                            except BackupError as error:
+                                if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
+                                    self.skip_unsafe(path,error,entry.kind);continue
+                                if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
+                                    raise
+                                self.errors.append({'path':path,'error_code':error.code,**error.details})
+                                self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
+                                continue
+                    seen[storage_key] = (path, entry)
+                    if len(seen) > self.max_files:
+                        raise BackupError("TRANSFER_LIMIT_EXCEEDED")
+                    if issue:
+                        self.walk.omit(path,'REMOTE_NAME_UNSUPPORTED')
+                        displayed_path = display_remote_path(path)
+                        omission = {"path": displayed_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
+                        self.skipped.append(omission)
+                        self.errors.append(dict(omission))
+                        self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
+                                  skipped_path=displayed_path, skipped_kind=omission['kind'], skip_reason=issue,
+                                  error_code="REMOTE_NAME_UNSUPPORTED")
+                        continue
+                    relative_path(path)
+                    special = unsupported_type(entry.kind)
+                    if self.skip_types and special:
+                        self.walk.omit(path,'REMOTE_TYPE_UNSUPPORTED')
+                        omission = {"path": display_remote_path(path), "kind": "special",
+                                    "reason": special, "error_code": "REMOTE_TYPE_UNSUPPORTED"}
+                        self.skipped.append(omission)
+                        self.errors.append(dict(omission))
+                        self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
+                                  skipped_path=omission['path'], skipped_kind="special",
+                                  skip_reason=special, error_code="REMOTE_TYPE_UNSUPPORTED")
+                        continue
+                    if entry.kind == "dir":
+                        if not cached:self.metadata.checked_parents.add(path)
+                        try:
+                            self.checkpoint.prepare_directory(path,entry)
                         except BackupError as error:
                             if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
-                                self.skip_unsafe(path,error,entry.kind);continue
+                                self.skip_unsafe(path,error,'dir');continue
                             if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
                                 raise
                             self.errors.append({'path':path,'error_code':error.code,**error.details})
                             self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
                             continue
-                seen[storage_key] = (path, entry)
-                if len(seen) > self.max_files:
-                    raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-                if issue:
-                    self.walk.omit(path,'REMOTE_NAME_UNSUPPORTED')
-                    displayed_path = display_remote_path(path)
-                    omission = {"path": displayed_path, "kind": entry.kind if entry.kind in {'file', 'dir'} else 'special', "reason": issue, "error_code": "REMOTE_NAME_UNSUPPORTED"}
-                    self.skipped.append(omission)
-                    self.errors.append(dict(omission))
-                    self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
-                              skipped_path=displayed_path, skipped_kind=omission['kind'], skip_reason=issue,
-                              error_code="REMOTE_NAME_UNSUPPORTED")
-                    continue
-                relative_path(path)
-                special = unsupported_type(entry.kind)
-                if self.skip_types and special:
-                    self.walk.omit(path,'REMOTE_TYPE_UNSUPPORTED')
-                    omission = {"path": display_remote_path(path), "kind": "special",
-                                "reason": special, "error_code": "REMOTE_TYPE_UNSUPPORTED"}
-                    self.skipped.append(omission)
-                    self.errors.append(dict(omission))
-                    self.emit(stage="FILE_SKIPPED", log=True, skipped_count=len(self.skipped),
-                              skipped_path=omission['path'], skipped_kind="special",
-                              skip_reason=special, error_code="REMOTE_TYPE_UNSUPPORTED")
-                    continue
-                if entry.kind == "dir":
-                    if not cached:self.metadata.checked_parents.add(path)
-                    try:
-                        self.checkpoint.prepare_directory(path,entry)
-                    except BackupError as error:
-                        if error.code=='REMOTE_PATH_UNSAFE' and self.continue_on_error:
-                            self.skip_unsafe(path,error,'dir');continue
-                        if error.code not in {'FILE_CONFLICT_PENDING','FILE_CONFLICT_SKIPPED'}:
-                            raise
-                        self.errors.append({'path':path,'error_code':error.code,**error.details})
-                        self.emit(stage='FILE_CONFLICT',log=True,error_code=error.code,**error.details)
-                        continue
-                    self.directories.append(self.checkpoint.storage_path(path))
-                    pending.append((path, depth + 1))
-                elif entry.kind == "file":
-                    self.planned_files += 1
-                    self.planned_bytes += entry.size
-                    if entry.size < 0 or self.planned_bytes > self.max_bytes:
-                        raise BackupError("TRANSFER_LIMIT_EXCEEDED")
-                    if path in self.enqueued_paths:continue
-                    with self.checkpoint.mutex:
-                        saved = self.checkpoint.db.execute('SELECT size,modified FROM files WHERE path=?',(path,)).fetchone()
-                    if (self.committed.get(path, (None, 0))[0] == 'done'
-                            and saved and saved['size']==entry.size and saved['modified']==entry.modified):
-                        self.verify_queue.put_nowait((1, path, entry))
-                        continue
-                    self.enqueue(path,entry)
-                else:
-                    raise BackupError("REMOTE_TYPE_UNSAFE")
-            self.emit(stage="SCANNING")
+                        self.directories.append(self.checkpoint.storage_path(path))
+                        pending.append((path, depth + 1))
+                    elif entry.kind == "file":
+                        self.planned_files += 1
+                        self.planned_bytes += entry.size
+                        if entry.size < 0 or self.planned_bytes > self.max_bytes:
+                            raise BackupError("TRANSFER_LIMIT_EXCEEDED")
+                        if path in self.enqueued_paths:continue
+                        with self.checkpoint.mutex:
+                            saved = self.checkpoint.db.execute('SELECT size,modified FROM files WHERE path=?',(path,)).fetchone()
+                        if (self.committed.get(path, (None, 0))[0] == 'done'
+                                and saved and saved['size']==entry.size and saved['modified']==entry.modified):
+                            self.verify_queue.put_nowait((1, path, entry))
+                            continue
+                        self.enqueue(path,entry)
+                    else:
+                        raise BackupError("REMOTE_TYPE_UNSAFE")
+                self.emit(stage="SCANNING")
         self.inventory_complete = not self.incomplete
         self.scanned.set()
         self.emit(stage="FILES_DOWNLOAD", log=True)
@@ -686,8 +716,8 @@ class ParallelCollector:
                 retry_call(once, wait=self.control.wait,
                            notify=lambda **event: self.emit(verification_retry=True, **event),
                            phase='FILE_VERIFY')
+                self.walk.verified(path,entry,item,verified_signature)
                 with self.mutex:
-                    self.walk.verified(path,entry,item,verified_signature)
                     self.items.append(item)
             except BackupError as error:
                 self.emit(stage='FILE_ERROR', log=True, current_file=path, error_code=error.code, **error.details)

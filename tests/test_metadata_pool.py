@@ -11,6 +11,74 @@ from jino_backup.errors import BackupError
 from jino_backup.parallel import MetadataSession,RunControl
 
 
+def test_large_tree_yields_scan_capacity_to_another_server(tmp_path):
+    first=tmp_path/'large'; first.mkdir()
+    for index in range(60):(first/str(index)).mkdir()
+    second=tmp_path/'small';second.mkdir();(second/'needed.txt').write_bytes(b'needed')
+    entered=threading.Event();downloaded=threading.Event()
+    budget=ConnectionBudget(10);budget.scan_slots=threading.Semaphore(1)
+    def run(root,target,slow=False):
+        class Source(FixtureSource):
+            def listdir(self,path):
+                if slow:
+                    entered.set()
+                    if path:time.sleep(.03)
+                return super().listdir(path)
+            def download(self,*args):
+                result=super().download(*args)
+                if not slow:downloaded.set()
+                return result
+        with DirectoryCheckpoint(target,'scope') as checkpoint:
+            return ParallelCollector(TaskControl(lambda s:None),lambda **e:None,budget,connections=2,
+                metadata_factory=lambda *a:Source(root),download_factory=lambda *a:Source(root)).collect({}, {'remote_root':'/'},target,checkpoint)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a=pool.submit(run,first,tmp_path/'copy-large',True)
+        try:
+            assert entered.wait(2)
+            b=pool.submit(run,second,tmp_path/'copy-small')
+            assert downloaded.wait(.8),'One whole tree monopolized the shared scan slot'
+        finally:
+            # An empty large tree may report FILES_MISSING; let every worker exit.
+            try:a.result(timeout=8)
+            except BackupError as error:assert error.code=='FILES_MISSING'
+        assert b.result(timeout=4)['count']==1
+
+
+def test_verification_persistence_does_not_lock_transfer_progress(tmp_path,monkeypatch):
+    from jino_backup.resume_inventory import ResumeInventory
+    remote=tmp_path/'remote';remote.mkdir();(remote/'file.txt').write_bytes(b'content')
+    collector=ParallelCollector(TaskControl(lambda s:None),lambda **e:None,ConnectionBudget(10),connections=2,
+        metadata_factory=lambda *a:FixtureSource(remote),download_factory=lambda *a:FixtureSource(remote))
+    original=ResumeInventory.verified
+    def verified(self,*args):
+        available=threading.Event()
+        def probe():
+            with collector.mutex:available.set()
+        thread=threading.Thread(target=probe,daemon=True);thread.start()
+        assert available.wait(.5),'Local receipt persistence retained the transfer-progress mutex'
+        thread.join(1)
+        return original(self,*args)
+    monkeypatch.setattr(ResumeInventory,'verified',verified)
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        assert collector.collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)['count']==1
+
+
+def test_routine_progress_is_coalesced_but_errors_and_final_state_are_delivered(tmp_path):
+    remote=tmp_path/'remote';remote.mkdir();(remote/'file.txt').write_bytes(b'content')
+    events=[]
+    collector=ParallelCollector(TaskControl(lambda s:None),lambda **e:events.append(e),ConnectionBudget(10),connections=2,
+        metadata_factory=lambda *a:FixtureSource(remote),download_factory=lambda *a:FixtureSource(remote))
+    with DirectoryCheckpoint(tmp_path/'copy','scope') as checkpoint:
+        collector.collect({}, {'remote_root':'/'},tmp_path/'copy',checkpoint)
+        events.clear()
+        for index in range(100):collector.emit(stage='SCANNING',log=True,directory=str(index))
+        assert len(events)<=2,'Routine progress synchronously writes once per file or directory'
+        collector.emit(stage='FILE_ERROR',log=True,error_code='SOURCE_CHANGED')
+        assert events[-1]['error_code']=='SOURCE_CHANGED'
+        collector.emit(stage='FILES_DOWNLOAD',force=True)
+        assert events[-1]['stage']=='FILES_DOWNLOAD'
+
+
 def test_saved_verifiers_do_not_hold_all_connections_before_another_server_downloads(tmp_path,monkeypatch):
     old=tmp_path/'old';old.mkdir();(old/'old.txt').write_bytes(b'old')
     new=tmp_path/'new';new.mkdir();(new/'new.txt').write_bytes(b'new')
